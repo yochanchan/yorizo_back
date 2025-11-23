@@ -1,3 +1,8 @@
+# NOTE:
+# - In GitHub -> Settings -> Secrets and variables -> Actions,
+#   create a secret named AZURE_WEBAPP_PUBLISH_PROFILE_BACKEND.
+# - Its value should be the publish profile XML downloaded
+#   from the Azure Portal for the App Service "yorizo-backend-app".
 name: Backend CI/CD
 
 on:
@@ -39,18 +44,10 @@ jobs:
             python -m compileall .
           fi
 
-      # NOTE:
-      # In Azure Portal, open the Web App "yorizo-backend-app" →
-      # "Get publish profile" and download the XML.
-      # In GitHub: Settings → Secrets and variables → Actions →
-      # New repository secret:
-      #   Name: AZURE_BACKEND_PUBLISH_PROFILE
-      #   Value: (paste the full contents of the publish profile XML)
-      # Make sure the publish profile is for the SAME app-name (and slot, if used).
       - name: Deploy backend to Azure Web App
         if: github.ref == 'refs/heads/main'
         uses: azure/webapps-deploy@v3
         with:
           app-name: yorizo-backend-app
-          publish-profile: ${{ secrets.AZURE_BACKEND_PUBLISH_PROFILE }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_BACKEND }}
           package: .
