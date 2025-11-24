@@ -1,10 +1,17 @@
 from typing import List
+import sys
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-import models
-from database import SessionLocal, engine
+ROOT = Path(__file__).resolve().parents[1]  # backend directory
+PROJECT_ROOT = ROOT.parent  # repository root
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from backend import models  # type: ignore  # noqa: E402
+from backend.database import SessionLocal, engine  # type: ignore  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -23,26 +30,46 @@ def _reset_rag_table():
 @pytest.fixture
 def client(monkeypatch) -> TestClient:
     """Test client with OpenAI calls mocked out."""
-    from app import rag as rag_module
-    from app.rag import store
-    from app.core import openai_client
-    import main
+    # Align module aliases so bare imports in app code resolve to the same modules
+    sys.modules["models"] = models
+    from backend import database as database_module
+    sys.modules["database"] = database_module
+
+    from backend.app.core import openai_client as backend_openai_client
+    sys.modules["app.core.openai_client"] = backend_openai_client
+
+    from backend.app import rag as rag_module  # noqa: F401
+    from backend.app.rag import store
+    from backend.main import app
+
+    # Avoid real OpenAI calls
+    monkeypatch.setattr(backend_openai_client.settings, "openai_api_key", "test-key")
+
+    class _DummyClient:
+        def __init__(self):
+            self.embeddings = self
+
+        def create(self, model, input):
+            texts = [input] if isinstance(input, str) else list(input)
+            return type("Resp", (), {"data": [type("Item", (), {"embedding": [float(len(t))]})() for t in texts]})
+
+    monkeypatch.setattr(backend_openai_client, "get_client", lambda: _DummyClient())
 
     async def fake_embed_texts(texts: str | List[str]):
         if isinstance(texts, str):
             texts = [texts]
-        # simple deterministic embedding based on text length
         return [[float(len(t)), float(len(t) % 10), float(len(t) % 5)] for t in texts]
 
     async def fake_chat(messages, with_system_prompt: bool = True):
         return "mocked answer"
 
     monkeypatch.setattr(store, "embed_texts", fake_embed_texts)
-    monkeypatch.setattr(openai_client, "embed_texts", fake_embed_texts)
-    monkeypatch.setattr(openai_client, "generate_chat_reply", fake_chat)
+    monkeypatch.setattr(backend_openai_client, "embed_texts", fake_embed_texts)
+    monkeypatch.setattr(backend_openai_client, "generate_chat_reply", fake_chat)
+    monkeypatch.setattr("backend.api.rag.generate_chat_reply", fake_chat, raising=False)
     monkeypatch.setattr("api.rag.generate_chat_reply", fake_chat, raising=False)
 
-    return TestClient(main.app)
+    return TestClient(app)
 
 
 def test_create_and_search(client: TestClient):
@@ -67,7 +94,6 @@ def test_create_and_search(client: TestClient):
 
 
 def test_chat_returns_citations(client: TestClient):
-    # prepare one document
     resp = client.post(
         "/api/rag/documents",
         json={"user_id": "chat-user", "documents": [{"title": "Doc", "text": "チャット用ドキュメント"}]},
