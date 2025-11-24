@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.schemas.rag import RagChatRequest, RagChatResponse
 from app.core.openai_client import generate_chat_reply
-from app.rag.store import query_similar, _ensure_rag_enabled
+from app.rag.store import query_similar
 from database import get_db
 
 router = APIRouter()
@@ -15,9 +15,8 @@ async def rag_chat_endpoint(payload: RagChatRequest, db: Session = Depends(get_d
     RAG-style chat for Japanese small business owners.
     """
     try:
-        _ensure_rag_enabled()
-        docs = await query_similar(db, user_id=None, query=payload.question, top_k=5)
-        context_texts = [d["content"] for d in docs]
+        docs = await query_similar(payload.question, k=5)
+        context_texts = [d["text"] for d in docs]
 
         system_content = (
             "あなたは日本の小規模事業者向けの経営相談AI『Yorizo』です。"
