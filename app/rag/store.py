@@ -34,18 +34,20 @@ async def index_document(
     db: Session,
     *,
     user_id: Optional[str],
-    source: str,
-    title: Optional[str],
+    source_type: str,
+    source_id: Optional[str],
+    title: str,
     content: str,
 ) -> RAGDocument:
     _ensure_rag_enabled()
     embedding_vec = (await embed_texts([content]))[0]
     doc = RAGDocument(
         user_id=user_id,
-        source=source,
+        source_type=source_type,
+        source_id=source_id,
         title=title,
         content=content,
-        embedding=json.dumps(embedding_vec),
+        embedding=embedding_vec,
     )
     db.add(doc)
     db.commit()
@@ -71,10 +73,12 @@ async def query_similar(
 
     scored: List[tuple[float, RAGDocument]] = []
     for d in docs:
-        if not d.embedding:
+        if d.embedding is None:
             continue
         try:
-            emb = json.loads(d.embedding)
+            emb = d.embedding
+            if isinstance(emb, str):
+                emb = json.loads(emb)
             score = cosine_similarity(query_vec, emb)
             scored.append((score, d))
         except Exception:
@@ -89,7 +93,8 @@ async def query_similar(
                 "id": d.id,
                 "title": d.title,
                 "content": d.content,
-                "source": d.source,
+                "source_type": d.source_type,
+                "source_id": d.source_id,
                 "score": score,
             }
         )
