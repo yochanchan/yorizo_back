@@ -21,7 +21,8 @@ class Settings(BaseSettings):
     # use DB_USERNAME instead for environment configuration.
     db_username: str | None = Field(default=None, env="DB_USERNAME")
     db_password: str | None = Field(default=None, env="DB_PASSWORD")
-    db_name: str | None = Field(default=None, env="DB_NAME")
+    # Azure 本番の DB 名は "yorizo" 想定。未指定ならこの名前を使う。
+    db_name: str | None = Field(default="yorizo", env="DB_NAME")
     database_url: str | None = Field(default=None, env="DATABASE_URL")
 
     openai_api_key: str | None = Field(default=None, env="OPENAI_API_KEY")
