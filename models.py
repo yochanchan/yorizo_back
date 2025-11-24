@@ -3,7 +3,19 @@ from __future__ import annotations
 from datetime import date, datetime
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, Column, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    JSON,
+    func,
+)
 from sqlalchemy.orm import relationship
 
 from database import Base
@@ -32,6 +44,7 @@ class User(Base):
     bookings = relationship("ConsultationBooking", back_populates="user", cascade="all, delete-orphan")
     company_profile = relationship("CompanyProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
     homework_tasks = relationship("HomeworkTask", back_populates="user", cascade="all, delete-orphan")
+    rag_documents = relationship("RAGDocument", back_populates="user", cascade="all, delete-orphan")
 
 
 class Conversation(Base):
@@ -166,6 +179,23 @@ class Document(Base):
     content_text = Column(Text, nullable=True)
 
     user = relationship("User", back_populates="documents")
+
+
+class RAGDocument(Base):
+    __tablename__ = "rag_documents"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True, index=True)
+    user_id = Column(String(255), ForeignKey("users.id"), nullable=True, index=True)
+    title = Column(String(512), nullable=False)
+    source_type = Column(String(50), nullable=False, default="manual")
+    source_id = Column(String(255), nullable=True)
+    content = Column(Text, nullable=False)
+    metadata_json = Column("metadata", JSON, nullable=True)
+    embedding = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    user = relationship("User", back_populates="rag_documents")
 
 
 class HomeworkTask(Base):
