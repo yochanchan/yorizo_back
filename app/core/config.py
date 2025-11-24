@@ -3,9 +3,14 @@ from pydantic import Field
 from sqlalchemy.engine import make_url
 
 DEFAULT_SQLITE_URL = "sqlite:///./yorizo.db"
-ASYNC_TO_SYNC_DRIVERS = {
+DRIVER_NORMALIZATION = {
+    # async -> sync
     "mysql+asyncmy": "mysql+pymysql",
     "sqlite+aiosqlite": "sqlite",
+    # mysql connector flavors -> pymysql (default in requirements)
+    "mysql+mysqlconnector": "mysql+pymysql",
+    "mysql+mysqldb": "mysql+pymysql",
+    "mysql": "mysql+pymysql",
 }
 
 
@@ -49,8 +54,8 @@ def normalize_db_url(url: str) -> str:
     """
     url_obj = make_url(url)
     driver = url_obj.drivername
-    if driver in ASYNC_TO_SYNC_DRIVERS:
-        url_obj = url_obj.set(drivername=ASYNC_TO_SYNC_DRIVERS[driver])
+    if driver in DRIVER_NORMALIZATION:
+        url_obj = url_obj.set(drivername=DRIVER_NORMALIZATION[driver])
     return url_obj.render_as_string(hide_password=False)
 
 

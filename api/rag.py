@@ -6,7 +6,8 @@ from app.rag.store import index_documents, query_similar
 from app.schemas.rag import (
     RagChatRequest,
     RagChatResponse,
-    RagDocumentCreate,
+    RagDocumentCreateRequest,
+    RagDocumentCreateResponse,
     RagDocumentResponse,
     RagQueryRequest,
     RagQueryResponse,
@@ -18,42 +19,67 @@ from models import RAGDocument
 router = APIRouter()
 
 
-@router.post("/rag/documents", response_model=RagDocumentResponse)
-async def create_rag_document(payload: RagDocumentCreate) -> RagDocumentResponse:
-    """
-    Register a single RAG document and store its embedding.
-    """
+def _resolve_owner_id(user_id: str | None, company_id: str | None) -> str | None:
+    return user_id or company_id
+
+
+@router.post(
+    "/rag/documents",
+    response_model=RagDocumentCreateResponse,
+    summary="Register RAG documents",
+    description="受け取ったドキュメント群をベクトル化し、rag_documents に保存します。",
+)
+async def create_rag_documents(payload: RagDocumentCreateRequest) -> RagDocumentCreateResponse:
+    owner_id = _resolve_owner_id(payload.user_id, payload.company_id)
+    if not payload.documents:
+        raise HTTPException(status_code=400, detail="documents is required")
+
     try:
-        saved_docs = await index_documents([payload.model_dump()])
-        if not saved_docs:
-            raise HTTPException(status_code=500, detail="Failed to save document")
-        return RagDocumentResponse.model_validate(saved_docs[0])
+        items = []
+        for doc in payload.documents:
+            data = doc.model_dump()
+            data["user_id"] = doc.user_id or doc.company_id or owner_id
+            data["text"] = doc.text  # ensure key exists for store
+            items.append(data)
+
+        saved_docs = await index_documents(items, default_user_id=owner_id)
+        return RagDocumentCreateResponse(documents=[RagDocumentResponse.model_validate(d) for d in saved_docs])
     except HTTPException:
         raise
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.get("/rag/documents", response_model=list[RagDocumentResponse])
+@router.get(
+    "/rag/documents",
+    response_model=list[RagDocumentResponse],
+    summary="List RAG documents",
+    description="rag_documents を時系列で取得します。user_id/company_id を指定すると絞り込みます。",
+)
 async def list_rag_documents(
     user_id: str | None = None,
+    company_id: str | None = None,
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
 ) -> list[RagDocumentResponse]:
+    owner_id = _resolve_owner_id(user_id, company_id)
     query = db.query(RAGDocument).order_by(RAGDocument.created_at.desc())
-    if user_id:
-        query = query.filter(RAGDocument.user_id == user_id)
+    if owner_id:
+        query = query.filter(RAGDocument.user_id == owner_id)
     docs = query.limit(limit).all()
     return [RagDocumentResponse.model_validate(doc) for doc in docs]
 
 
-@router.post("/rag/search", response_model=RagQueryResponse)
+@router.post(
+    "/rag/search",
+    response_model=RagQueryResponse,
+    summary="Search similar RAG documents",
+    description="クエリを埋め込み、rag_documents から類似度上位を返します。",
+)
 async def rag_search(payload: RagQueryRequest) -> RagQueryResponse:
-    """
-    Return the most similar stored documents for a query.
-    """
     try:
-        results = await query_similar(payload.question, k=payload.top_k, user_id=payload.user_id)
+        owner_id = _resolve_owner_id(payload.user_id, payload.company_id)
+        results = await query_similar(payload.query, k=payload.top_k, user_id=owner_id)
         matches = [
             RagSimilarDocument(
                 id=doc["id"],
@@ -67,18 +93,34 @@ async def rag_search(payload: RagQueryRequest) -> RagQueryResponse:
         return RagQueryResponse(matches=matches)
     except HTTPException:
         raise
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.post("/rag/chat", response_model=RagChatResponse)
+@router.post(
+    "/rag/chat",
+    response_model=RagChatResponse,
+    summary="RAG chat with retrieved context",
+    description="クエリを基に類似ドキュメントを検索し、コンテキストを付与して回答します。",
+)
 async def rag_chat_endpoint(payload: RagChatRequest) -> RagChatResponse:
-    """
-    RAG-style chat for Japanese small business owners.
-    """
     try:
-        docs = await query_similar(payload.question, k=5, user_id=payload.user_id)
+        owner_id = _resolve_owner_id(payload.user_id, payload.company_id)
+
+        query_text: str | None = payload.question
+        if payload.messages:
+            for msg in reversed(payload.messages):
+                if msg.role == "user" and msg.content:
+                    query_text = msg.content
+                    break
+        if not query_text and payload.history:
+            query_text = payload.history[-1]
+        if not query_text:
+            raise HTTPException(status_code=400, detail="No user query provided")
+
+        docs = await query_similar(query_text, k=payload.top_k, user_id=owner_id)
         context_texts = [d["text"] for d in docs]
+        citations = [int(d["id"]) for d in docs if d.get("id") is not None]
 
         system_content = (
             "あなたは日本の小規模事業者を支援する経営相談AI『Yorizo』です。"
@@ -92,18 +134,24 @@ async def rag_chat_endpoint(payload: RagChatRequest) -> RagChatResponse:
 
         messages = [
             {"role": "system", "content": system_content},
-            {"role": "system", "content": f"参考情報:\n{context_block}" if context_block else "参考情報はありません。"},
+            {
+                "role": "system",
+                "content": f"参考情報:\n{context_block}" if context_block else "参考情報はありません。",
+            },
         ]
 
         for history_item in payload.history:
             messages.append({"role": "user", "content": history_item})
+        for msg in payload.messages:
+            messages.append({"role": msg.role, "content": msg.content})
 
-        messages.append({"role": "user", "content": payload.question})
+        if not any(m.get("role") == "user" for m in messages):
+            messages.append({"role": "user", "content": query_text})
 
         answer = await generate_chat_reply(messages, with_system_prompt=False)
 
-        return RagChatResponse(answer=answer, contexts=context_texts)
+        return RagChatResponse(answer=answer, contexts=context_texts, citations=citations)
     except HTTPException:
         raise
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc

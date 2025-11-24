@@ -30,7 +30,7 @@ def _cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
     return dot / (na * nb)
 
 
-async def query_similar(question: str, k: int = 5, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+async def query_similar(question: str, k: int = 5, user_id: Optional[str] = None, company_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Simple MySQL-backed RAG retrieval:
     - embed the question
@@ -42,12 +42,13 @@ async def query_similar(question: str, k: int = 5, user_id: Optional[str] = None
     if not query_emb_list:
         return []
     query_emb = query_emb_list[0]
+    owner_id = user_id or company_id
 
     session: Session = SessionLocal()
     try:
         query = session.query(RAGDocument)
-        if user_id:
-            query = query.filter(RAGDocument.user_id == user_id)
+        if owner_id:
+            query = query.filter(RAGDocument.user_id == owner_id)
         docs: List[RAGDocument] = query.all()
     finally:
         session.close()
@@ -88,7 +89,7 @@ async def query_similar(question: str, k: int = 5, user_id: Optional[str] = None
     return results
 
 
-async def index_documents(documents: List[Dict[str, Any]]) -> List[RAGDocument]:
+async def index_documents(documents: List[Dict[str, Any]], default_user_id: Optional[str] = None) -> List[RAGDocument]:
     """
     Bulk upsert helper for RAG documents.
     Each item:
@@ -121,6 +122,15 @@ async def index_documents(documents: List[Dict[str, Any]]) -> List[RAGDocument]:
                 doc_id = None
 
             doc = session.get(RAGDocument, doc_id) if doc_id is not None else None
+            owner_id = payload.get("user_id") or default_user_id
+
+            # Upsert by source_id + user_id if provided
+            if doc is None and payload.get("source_id") and owner_id:
+                doc = (
+                    session.query(RAGDocument)
+                    .filter(RAGDocument.source_id == payload["source_id"], RAGDocument.user_id == owner_id)
+                    .first()
+                )
             if doc is None:
                 doc = RAGDocument()
                 session.add(doc)
@@ -129,7 +139,7 @@ async def index_documents(documents: List[Dict[str, Any]]) -> List[RAGDocument]:
             if text_value is None:
                 raise ValueError("Document payload missing 'text'")
 
-            doc.user_id = payload.get("user_id")
+            doc.user_id = owner_id
             doc.title = payload.get("title") or (text_value or "")[:80] or ""
             doc.source_type = payload.get("source_type") or (doc.source_type or "manual")
             doc.source_id = payload.get("source_id")

@@ -21,7 +21,7 @@ def upgrade() -> None:
     if not inspector.has_table("rag_documents"):
         op.create_table(
             "rag_documents",
-            sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
+            sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
             sa.Column("user_id", sa.String(length=255), nullable=True),
             sa.Column("title", sa.String(length=512), nullable=False),
             sa.Column("source_type", sa.String(length=50), nullable=False, server_default="system"),
