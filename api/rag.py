@@ -1,29 +1,23 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from sqlalchemy.orm import Session
 
 from app.schemas.rag import RagChatRequest, RagChatResponse
 from app.core.openai_client import generate_chat_reply
-from app.rag.store import query_similar, CHROMA_AVAILABLE
+from app.rag.store import query_similar, _ensure_rag_enabled
+from database import get_db
 
 router = APIRouter()
 
 
-def _ensure_rag() -> None:
-    if not CHROMA_AVAILABLE:
-        raise HTTPException(
-            status_code=503,
-            detail="RAG is temporarily disabled in this environment (vector store not available).",
-        )
-
-
 @router.post("/rag/chat", response_model=RagChatResponse)
-async def rag_chat_endpoint(payload: RagChatRequest) -> RagChatResponse:
+async def rag_chat_endpoint(payload: RagChatRequest, db: Session = Depends(get_db)) -> RagChatResponse:
     """
     RAG-style chat for Japanese small business owners.
     """
     try:
-        _ensure_rag()
-        docs = await query_similar(payload.question, k=5)
-        context_texts = [d["text"] for d in docs]
+        _ensure_rag_enabled()
+        docs = await query_similar(db, user_id=None, query=payload.question, top_k=5)
+        context_texts = [d["content"] for d in docs]
 
         system_content = (
             "あなたは日本の小規模事業者向けの経営相談AI『Yorizo』です。"
@@ -50,5 +44,7 @@ async def rag_chat_endpoint(payload: RagChatRequest) -> RagChatResponse:
         answer = await generate_chat_reply(messages, with_system_prompt=False)
 
         return RagChatResponse(answer=answer, contexts=context_texts)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
