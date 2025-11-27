@@ -46,10 +46,12 @@ def list_homework_tasks(
         query = query.filter(HomeworkTask.status == status_filter)
 
     status_order = case((HomeworkTask.status == "pending", 0), else_=1)
+    due_date_nulls_last = case((HomeworkTask.due_date.is_(None), 1), else_=0)
     tasks = (
         query.order_by(
             status_order,
-            HomeworkTask.due_date.asc().nulls_last(),
+            due_date_nulls_last,
+            HomeworkTask.due_date.asc(),
             HomeworkTask.created_at,
         )
         .all()

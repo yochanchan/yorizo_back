@@ -1,5 +1,5 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
 DEFAULT_SQLITE_URL = "sqlite:///./yorizo.db"
@@ -21,13 +21,18 @@ class Settings(BaseSettings):
     # use DB_USERNAME instead for environment configuration.
     db_username: str | None = Field(default=None, env="DB_USERNAME")
     db_password: str | None = Field(default=None, env="DB_PASSWORD")
-    # Azure 本番の DB 名は "yorizo" 想定。未指定ならこの名前を使う。
+    # Azure production DB name defaults to "yorizo" when not provided explicitly.
     db_name: str | None = Field(default="yorizo", env="DB_NAME")
     database_url: str | None = Field(default=None, env="DATABASE_URL")
+    app_env: str | None = Field(default=None, env="APP_ENV")
 
     openai_api_key: str | None = Field(default=None, env="OPENAI_API_KEY")
     openai_model_chat: str = Field(default="gpt-4.1-mini", env="OPENAI_MODEL_CHAT")
     openai_model_embedding: str = Field(default="text-embedding-3-small", env="OPENAI_MODEL_EMBEDDING")
+    azure_openai_endpoint: str | None = Field(default=None, env="AZURE_OPENAI_ENDPOINT")
+    azure_openai_api_key: str | None = Field(default=None, env="AZURE_OPENAI_API_KEY")
+    azure_openai_chat_deployment: str | None = Field(default=None, env="AZURE_OPENAI_CHAT_DEPLOYMENT")
+    azure_openai_api_version: str = Field(default="2025-04-01-preview", env="AZURE_OPENAI_API_VERSION")
     rag_persist_dir: str = Field(default="./rag_store", env="RAG_PERSIST_DIR")
     rag_enabled: bool = Field(default=True, env="ENABLE_RAG")
 

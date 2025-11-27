@@ -9,12 +9,13 @@ class HomeworkTaskBase(BaseModel):
     detail: Optional[str] = None
     category: Optional[str] = Field(default=None, max_length=50)
     due_date: Optional[date] = None
-    status: Optional[str] = Field(default=None, pattern="^(pending|done)$")
+    timeframe: Optional[str] = Field(default=None, max_length=100)
+    status: Optional[str] = Field(default=None, pattern="^(pending|in_progress|done)$")
 
 
 class HomeworkTaskCreate(HomeworkTaskBase):
     user_id: str
-    conversation_id: Optional[str] = None
+    conversation_id: str
     status: Optional[str] = "pending"
 
 
@@ -23,7 +24,8 @@ class HomeworkTaskUpdate(BaseModel):
     detail: Optional[str] = None
     category: Optional[str] = Field(default=None, max_length=50)
     due_date: Optional[date] = None
-    status: Optional[str] = Field(default=None, pattern="^(pending|done)$")
+    timeframe: Optional[str] = Field(default=None, max_length=100)
+    status: Optional[str] = Field(default=None, pattern="^(pending|in_progress|done)$")
 
 
 class HomeworkTaskRead(HomeworkTaskBase):

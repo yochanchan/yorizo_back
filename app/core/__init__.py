@@ -1,1 +1,1 @@
-__all__ = ["config", "openai_client"]
+__all__ = ["config", "openai_client", "env"]

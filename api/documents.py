@@ -1,12 +1,14 @@
 import os
+import uuid
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
+from app.rag.ingest import ingest_document
 from app.schemas.document import DocumentItem, DocumentListResponse, DocumentUploadResponse
 from database import get_db
 from models import Document, User
@@ -77,7 +79,13 @@ def _extract_text(filename: str, content: bytes, mime_type: str | None) -> str:
 
 @router.post("/documents/upload", response_model=DocumentUploadResponse)
 async def upload_document(
-    file: UploadFile = File(...), user_id: str | None = Form(None), db: Session = Depends(get_db)
+    file: UploadFile = File(...),
+    user_id: str | None = Form(None),
+    company_id: str | None = Form(None),
+    conversation_id: str | None = Form(None),
+    doc_type: str | None = Form(None),
+    period_label: str | None = Form(None),
+    db: Session = Depends(get_db),
 ) -> DocumentUploadResponse:
     _ensure_upload_dir()
     contents = await file.read()
@@ -91,7 +99,7 @@ async def upload_document(
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="サポートされていないファイル形式です。")
 
-    saved_name = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{file.filename}"
+    saved_name = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex}_{file.filename}"
     save_path = UPLOAD_DIR / saved_name
     with open(save_path, "wb") as f:
         f.write(contents)
@@ -100,15 +108,27 @@ async def upload_document(
     text_content = _extract_text(file.filename or "document", contents, file.content_type)
     doc = Document(
         user_id=user_id,
+        company_id=company_id,
+        conversation_id=conversation_id,
         filename=file.filename or "document",
         mime_type=file.content_type,
         size_bytes=size_bytes,
         uploaded_at=datetime.utcnow(),
         content_text=text_content,
+        doc_type=doc_type,
+        period_label=period_label,
+        storage_path=str(save_path),
+        ingested=False,
     )
     db.add(doc)
     db.commit()
     db.refresh(doc)
+
+    try:
+        await ingest_document(db, doc)
+    except Exception:
+        # Fail softly; document remains ingested=False
+        pass
 
     summary = (text_content[:140] + "...") if text_content and len(text_content) > 140 else (text_content or "")
     return DocumentUploadResponse(
@@ -116,6 +136,8 @@ async def upload_document(
         filename=doc.filename,
         uploaded_at=doc.uploaded_at,
         summary=summary,
+        storage_path=doc.storage_path,
+        ingested=doc.ingested,
     )
 
 
@@ -133,6 +155,14 @@ async def list_documents(user_id: str | None = None, db: Session = Depends(get_d
                 uploaded_at=doc.uploaded_at,
                 size_bytes=doc.size_bytes,
                 mime_type=doc.mime_type,
+                content_type=doc.mime_type,
+                company_id=doc.company_id,
+                conversation_id=doc.conversation_id,
+                doc_type=doc.doc_type,
+                period_label=doc.period_label,
+                storage_path=doc.storage_path,
+                ingested=doc.ingested,
+                content_text=doc.content_text,
             )
             for doc in docs
         ]

@@ -3,6 +3,7 @@ import sys
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.engine.url import make_url
 from alembic import context
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -35,10 +36,17 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    main_url = config.get_main_option("sqlalchemy.url")
+    url_obj = make_url(main_url)
+    connect_args = {}
+    if url_obj.drivername.startswith("mysql"):
+        connect_args["ssl"] = {"ca": "/etc/ssl/certs/ca-certificates.crt"}
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=connect_args,
     )
 
     with connectable.connect() as connection:

@@ -37,6 +37,8 @@ jobs:
           fi
 
       - name: Run tests or compile check
+        env:
+          APP_ENV: test
         run: |
           if [ -d tests ] || [ -f pytest.ini ]; then
             python -m pip install pytest

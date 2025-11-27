@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Column,
     Date,
     DateTime,
@@ -57,11 +58,15 @@ class Conversation(Base):
     ended_at = Column(DateTime, nullable=True)
     main_concern = Column(Text, nullable=True)
     channel = Column(String(50), default="chat")
+    category = Column(String(32), nullable=True)
+    status = Column(String(32), default="in_progress")
+    step = Column(Integer, nullable=True)
 
     user = relationship("User", back_populates="conversations")
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
     memo = relationship("ConsultationMemo", back_populates="conversation", uselist=False, cascade="all, delete-orphan")
     homework_tasks = relationship("HomeworkTask", back_populates="conversation", cascade="all, delete-orphan")
+    documents = relationship("Document", back_populates="conversation", cascade="all, delete-orphan")
 
 
 class Message(Base):
@@ -177,13 +182,20 @@ class Document(Base):
 
     id = Column(String(36), primary_key=True, default=default_uuid)
     user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    company_id = Column(String(36), nullable=True)
+    conversation_id = Column(String(36), ForeignKey("conversations.id"), nullable=True)
     filename = Column(String(255), nullable=False)
     mime_type = Column(String(100), nullable=True)
     size_bytes = Column(Integer, nullable=False)
     uploaded_at = Column(DateTime, default=utcnow)
     content_text = Column(Text, nullable=True)
+    doc_type = Column(String(50), nullable=True)
+    period_label = Column(String(50), nullable=True)
+    storage_path = Column(String(500), nullable=False)
+    ingested = Column(Boolean, default=False)
 
     user = relationship("User", back_populates="documents")
+    conversation = relationship("Conversation", back_populates="documents")
 
 
 class RAGDocument(Base):
@@ -216,6 +228,7 @@ class HomeworkTask(Base):
     category = Column(String(50), nullable=True)
     status = Column(String(20), nullable=False, default="pending")
     due_date = Column(Date, nullable=True)
+    timeframe = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
     completed_at = Column(DateTime, nullable=True)

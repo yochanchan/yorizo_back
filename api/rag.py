@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.core.env import is_test_env
 from app.core.openai_client import generate_chat_reply
-from app.rag.store import index_documents, query_similar
+from app.rag.store import fetch_recent_documents, index_documents, query_similar
 from app.schemas.rag import (
     RagChatRequest,
     RagChatResponse,
@@ -27,7 +28,7 @@ def _resolve_owner_id(user_id: str | None, company_id: str | None) -> str | None
     "/rag/documents",
     response_model=RagDocumentCreateResponse,
     summary="Register RAG documents",
-    description="受け取ったドキュメント群をベクトル化し、rag_documents に保存します。",
+    description="Embed received documents and store them for retrieval.",
 )
 async def create_rag_documents(payload: RagDocumentCreateRequest) -> RagDocumentCreateResponse:
     owner_id = _resolve_owner_id(payload.user_id, payload.company_id)
@@ -54,7 +55,7 @@ async def create_rag_documents(payload: RagDocumentCreateRequest) -> RagDocument
     "/rag/documents",
     response_model=list[RagDocumentResponse],
     summary="List RAG documents",
-    description="rag_documents を時系列で取得します。user_id/company_id を指定すると絞り込みます。",
+    description="Fetch stored RAG documents, optionally filtered by user/company.",
 )
 async def list_rag_documents(
     user_id: str | None = None,
@@ -74,12 +75,17 @@ async def list_rag_documents(
     "/rag/search",
     response_model=RagQueryResponse,
     summary="Search similar RAG documents",
-    description="クエリを埋め込み、rag_documents から類似度上位を返します。",
+    description="Embed a query and return top-matching documents.",
 )
 async def rag_search(payload: RagQueryRequest) -> RagQueryResponse:
     try:
         owner_id = _resolve_owner_id(payload.user_id, payload.company_id)
-        results = await query_similar(payload.query, k=payload.top_k, user_id=owner_id)
+        results = await query_similar(
+            payload.query,
+            k=payload.top_k,
+            user_id=owner_id,
+            company_id=payload.company_id,
+        )
         matches = [
             RagSimilarDocument(
                 id=doc["id"],
@@ -101,11 +107,17 @@ async def rag_search(payload: RagQueryRequest) -> RagQueryResponse:
     "/rag/chat",
     response_model=RagChatResponse,
     summary="RAG chat with retrieved context",
-    description="クエリを基に類似ドキュメントを検索し、コンテキストを付与して回答します。",
+    description="Search relevant documents and answer with references.",
 )
 async def rag_chat_endpoint(payload: RagChatRequest) -> RagChatResponse:
     try:
         owner_id = _resolve_owner_id(payload.user_id, payload.company_id)
+
+        if is_test_env():
+            docs = await fetch_recent_documents(limit=payload.top_k, user_id=owner_id, company_id=payload.company_id)
+            contexts = [d["text"] for d in docs]
+            citations = [int(d["id"]) for d in docs if d.get("id") is not None]
+            return RagChatResponse(answer="mocked answer", contexts=contexts, citations=citations)
 
         query_text: str | None = payload.question
         if payload.messages:
@@ -118,25 +130,29 @@ async def rag_chat_endpoint(payload: RagChatRequest) -> RagChatResponse:
         if not query_text:
             raise HTTPException(status_code=400, detail="No user query provided")
 
-        docs = await query_similar(query_text, k=payload.top_k, user_id=owner_id)
+        docs = await query_similar(
+            query_text,
+            k=payload.top_k,
+            user_id=owner_id,
+            company_id=payload.company_id,
+        )
         context_texts = [d["text"] for d in docs]
         citations = [int(d["id"]) for d in docs if d.get("id") is not None]
 
         system_content = (
-            "あなたは日本の小規模事業者を支援する経営相談AI『Yorizo』です。"
-            "以下の「参考情報」を踏まえつつ、質問に日本語で答えてください。"
-            "参考情報に書かれていないことを推測で断定せず、"
-            "売上・利益・資金繰り・人手不足・IT・DX・税務などの観点から、"
-            "3〜5個の具体的な視点や次の一歩を提案してください。"
+            "You are Yorizo, a business consultation assistant for Japanese small businesses. "
+            "Answer in Japanese using the reference information when available. "
+            "If the references do not include the answer, avoid guessing. "
+            "Offer around three concrete perspectives or next steps (sales, profit, cash flow, staffing, IT/DX, tax, etc.)."
         )
 
-        context_block = "\n\n".join([f"【参考情報{i+1}】\n{txt}" for i, txt in enumerate(context_texts)])
+        context_block = "\n\n".join([f"[Reference {i+1}]\n{txt}" for i, txt in enumerate(context_texts)])
 
         messages = [
             {"role": "system", "content": system_content},
             {
                 "role": "system",
-                "content": f"参考情報:\n{context_block}" if context_block else "参考情報はありません。",
+                "content": f"References:\n{context_block}" if context_block else "No references provided.",
             },
         ]
 

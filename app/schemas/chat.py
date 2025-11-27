@@ -1,41 +1,35 @@
 from typing import List, Literal, Optional
-from pydantic import BaseModel
+
+from pydantic import BaseModel, Field
 
 
-class ChatMessage(BaseModel):
-  role: Literal["user", "assistant", "system"]
-  content: str
+class ChatOption(BaseModel):
+    id: str = Field(..., description="Internal ID for the option")
+    label: str = Field(..., description="Text shown in the UI")
+    value: Optional[str] = Field(None, description="Text that is treated as the user answer")
 
 
-class ChatProfile(BaseModel):
-  industry: Optional[str] = None
-  employees: Optional[str] = None
-  annual_sales_range: Optional[str] = None
-
-class ChatChoice(BaseModel):
-  id: str
-  label: str
+class GuidedUserSelection(BaseModel):
+    type: Literal["choice", "free_text"]
+    id: Optional[str] = Field(None, description="Internal option key when type is choice")
+    label: Optional[str] = Field(None, description="Display label (Japanese) for the choice")
+    text: Optional[str] = Field(None, description="Free text when type is free_text")
 
 
-class HomeworkSuggestion(BaseModel):
-  title: str
-  detail: Optional[str] = None
-  category: Optional[str] = None
+class ChatTurnRequest(BaseModel):
+    conversation_id: Optional[str] = None
+    user_id: Optional[str] = None
+    selection: Optional[GuidedUserSelection] = None
+    message: Optional[str] = Field(None, description="Free text input from the user (legacy)")
+    selected_option_id: Optional[str] = Field(None, description="Option chosen by the user (legacy)")
+    category: Optional[str] = Field(None, description="High-level topic: sales/cash/hr/ops/other")
 
 
-class ChatRequest(BaseModel):
-  messages: List[ChatMessage]
-  profile: Optional[ChatProfile] = None
-  document_ids: Optional[List[str]] = None
-  conversation_id: Optional[str] = None
-  user_id: Optional[str] = None
-
-
-class ChatResponse(BaseModel):
-  conversation_id: str
-  message: str
-  choices: List[ChatChoice]
-  suggested_next_questions: Optional[List[str]] = None
-  choice_options: Optional[List[str]] = None
-  progress: Optional[int] = None
-  homework_suggestions: Optional[List[HomeworkSuggestion]] = None
+class ChatTurnResponse(BaseModel):
+    conversation_id: str
+    reply: str
+    question: str
+    options: List[ChatOption] = Field(default_factory=list)
+    allow_free_text: bool = True
+    step: int = 1
+    done: bool = False
