@@ -3,8 +3,9 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from app.core.openai_client import AzureNotConfiguredError, chat_completion_json
@@ -106,76 +107,90 @@ def _generate_report(
 
 @router.get("/{conversation_id}", response_model=ReportEnvelope)
 def get_report(conversation_id: str, db: Session = Depends(get_db)) -> ReportEnvelope:
-    conversation = db.query(Conversation).filter(Conversation.id == conversation_id).first()
-    if not conversation:
-        return ReportEnvelope(exists=False, report=None)
-
-    messages = (
-        db.query(Message)
-        .filter(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at.asc())
-        .all()
-    )
-    homework = (
-        db.query(HomeworkTask)
-        .filter(HomeworkTask.conversation_id == conversation_id)
-        .order_by(HomeworkTask.created_at.asc())
-        .all()
-    )
-    documents = (
-        db.query(Document)
-        .filter(
-            (Document.conversation_id == conversation_id)
-            | (Document.company_id == conversation.user_id)
-        )
-        .order_by(Document.uploaded_at.desc())
-        .all()
-    )
-
-    transcript = _build_transcript(messages)
-    homework_text = _build_homework_text(homework)
-    docs_context = _build_documents_context(documents)
-
-    summary: List[str] = _heuristic_summary(messages)
-    financial_analysis: List[str] = []
-    strengths: List[str] = []
-    weaknesses: List[str] = []
-    generated: Dict[str, Any] = {}
-
     try:
-        generated = _generate_report(transcript, homework_text, docs_context)
-        if isinstance(generated, dict):
-            summary = [str(x) for x in generated.get("summary") or summary if x][:4]
-            financial_analysis = [str(x) for x in (generated.get("financial_analysis") or []) if x][:4]
-            strengths = [str(x) for x in (generated.get("strengths") or []) if x][:3]
-            weaknesses = [str(x) for x in (generated.get("weaknesses") or []) if x][:3]
-    except AzureNotConfiguredError:
-        logger.warning("Azure OpenAI is not configured; returning heuristic report.")
-    except Exception:
-        logger.exception("Report generation via Azure OpenAI failed")
+        conversation = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if not conversation:
+            return ReportEnvelope(exists=False, report=None)
 
-    homework_items: List[ReportHomework] = []
-    for task in homework:
-        homework_items.append(
-            ReportHomework(
-                id=task.id,
-                title=task.title,
-                detail=task.detail,
-                timeframe=task.timeframe,
-                status=_normalize_status(task.status),
+        messages = (
+            db.query(Message)
+            .filter(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.asc())
+            .all()
+        )
+        status_order = case((HomeworkTask.status == "pending", 0), else_=1)
+        due_date_nulls_last = case((HomeworkTask.due_date.is_(None), 1), else_=0)
+        homework = (
+            db.query(HomeworkTask)
+            .filter(HomeworkTask.conversation_id == conversation_id)
+            .order_by(
+                status_order,
+                due_date_nulls_last,
+                HomeworkTask.due_date.asc(),
+                HomeworkTask.created_at.asc(),
             )
+            .all()
+        )
+        documents = (
+            db.query(Document)
+            .filter(
+                (Document.conversation_id == conversation_id)
+                | (Document.company_id == conversation.user_id)
+            )
+            .order_by(Document.uploaded_at.desc())
+            .all()
         )
 
-    report = ReportResponse(
-        id=str(conversation.id),
-        title=conversation.title or "Yorizoレポート",
-        category=conversation.category,
-        created_at=conversation.started_at or datetime.utcnow(),
-        summary=summary or ["現在の会話内容を確認してください。"],
-        financial_analysis=financial_analysis,
-        strengths=strengths,
-        weaknesses=weaknesses,
-        homework=homework_items,
-    )
+        transcript = _build_transcript(messages)
+        homework_text = _build_homework_text(homework)
+        docs_context = _build_documents_context(documents)
 
-    return ReportEnvelope(exists=True, report=report)
+        summary: List[str] = _heuristic_summary(messages)
+        financial_analysis: List[str] = []
+        strengths: List[str] = []
+        weaknesses: List[str] = []
+        generated: Dict[str, Any] = {}
+
+        try:
+            generated = _generate_report(transcript, homework_text, docs_context)
+            if isinstance(generated, dict):
+                summary = [str(x) for x in generated.get("summary") or summary if x][:4]
+                financial_analysis = [str(x) for x in (generated.get("financial_analysis") or []) if x][:4]
+                strengths = [str(x) for x in (generated.get("strengths") or []) if x][:3]
+                weaknesses = [str(x) for x in (generated.get("weaknesses") or []) if x][:3]
+        except AzureNotConfiguredError:
+            logger.warning("Azure OpenAI is not configured; returning heuristic report.")
+        except Exception:
+            logger.exception("Report generation via Azure OpenAI failed")
+
+        homework_items: List[ReportHomework] = []
+        for task in homework:
+            homework_items.append(
+                ReportHomework(
+                    id=task.id,
+                    title=task.title,
+                    detail=task.detail,
+                    timeframe=task.timeframe,
+                    status=_normalize_status(task.status),
+                )
+            )
+
+        report = ReportResponse(
+            id=str(conversation.id),
+            title=conversation.title or "Yorizo????",
+            category=conversation.category,
+            created_at=conversation.started_at or datetime.utcnow(),
+            summary=summary or ["?????????????????"],
+            financial_analysis=financial_analysis,
+            strengths=strengths,
+            weaknesses=weaknesses,
+            homework=homework_items,
+        )
+
+        return ReportEnvelope(exists=True, report=report)
+
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - final safeguard
+        logger.exception("Failed to generate report for conversation_id=%s", conversation_id)
+        raise HTTPException(status_code=500, detail="report_generation_failed") from exc
