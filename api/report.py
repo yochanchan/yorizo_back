@@ -177,10 +177,10 @@ def get_report(conversation_id: str, db: Session = Depends(get_db)) -> ReportEnv
 
         report = ReportResponse(
             id=str(conversation.id),
-            title=conversation.title or "Yorizo????",
+            title=conversation.title or "Yorizoとの相談記録",
             category=conversation.category,
             created_at=conversation.started_at or datetime.utcnow(),
-            summary=summary or ["?????????????????"],
+            summary=summary or ["サマリーはまだ生成されていません。"],
             financial_analysis=financial_analysis,
             strengths=strengths,
             weaknesses=weaknesses,

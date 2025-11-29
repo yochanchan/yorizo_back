@@ -16,6 +16,7 @@ from api import (
     memory,
     rag,
     report,
+    reports,
 )
 from database import Base, engine
 import models  # noqa: F401
@@ -90,6 +91,7 @@ app.include_router(documents.router, prefix="/api", tags=["documents"])
 app.include_router(experts.router, prefix="/api", tags=["experts"])
 app.include_router(homework.router, prefix="/api", tags=["homework"])
 app.include_router(report.router, prefix="/api", tags=["report"])
+app.include_router(reports.router, prefix="/api", tags=["reports"])
 app.include_router(admin_bookings.router, prefix="/api", tags=["admin"])
 app.include_router(case_examples.router, prefix="/api", tags=["case-examples"])
 
