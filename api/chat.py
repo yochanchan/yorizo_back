@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.openai_client import AzureNotConfiguredError, chat_completion_json
 from app.schemas.chat import ChatTurnRequest, ChatTurnResponse
 from database import get_db
-from models import Conversation, Message, User
+from models import CompanyProfile, Conversation, Document, Memory, Message, User
 from services import rag as rag_service  # RAG 用サービスレイヤー
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -100,7 +100,7 @@ def _find_option_label(messages: List[Message], option_id: str) -> Optional[str]
 
 
 def _history_as_text(messages: List[Message]) -> str:
-    """直近の会話履歴を、人間が読めるテキストに変換する。"""
+    """?????????????????????"""
     lines: List[str] = []
     for msg in messages[-10:]:
         if msg.role == "assistant":
@@ -111,12 +111,73 @@ def _history_as_text(messages: List[Message]) -> str:
                 if reply:
                     lines.append(f"Yorizo: {reply}")
                 if question:
-                    lines.append(f"質問: {question}")
+                    lines.append(f"??: {question}")
             except Exception:
                 lines.append(f"Yorizo: {msg.content}")
         else:
-            lines.append(f"ユーザー: {msg.content}")
+            lines.append(f"????: {msg.content}")
     return "\n".join(lines)
+
+
+def _collect_structured_context(db: Session, user: Optional[User], conversation: Conversation) -> List[str]:
+    """
+    /company, /memory, /documents に相当する情報を日本語テキストに整形する。
+    """
+    del conversation  # 将来的に会話単位の要素を扱う余地を残す
+    pieces: List[str] = []
+    if not user:
+        return pieces
+
+    profile = db.query(CompanyProfile).filter(CompanyProfile.user_id == user.id).first()
+    if profile:
+        pieces.append(
+            "【会社情報】\n"
+            f"会社名: {profile.company_name or '未登録'}\n"
+            f"業種: {profile.industry or '未登録'}\n"
+            f"従業員数: {profile.employees_range or '未登録'}\n"
+            f"年商レンジ: {profile.annual_sales_range or '未登録'}\n"
+            f"所在地: {profile.location_prefecture or '未登録'}\n"
+        )
+
+    memory = (
+        db.query(Memory)
+        .filter(Memory.user_id == user.id)
+        .order_by(Memory.last_updated_at.desc())
+        .first()
+    )
+    if memory:
+        lines = ["【Yorizoの記憶】"]
+        if memory.current_concerns:
+            lines.append(f"- 現在気になっていること: {memory.current_concerns}")
+        if memory.important_points:
+            lines.append(f"- 専門家に伝えたいポイント: {memory.important_points}")
+        if memory.remembered_facts:
+            lines.append(f"- 最近のメモ: {memory.remembered_facts}")
+        pieces.append("\n".join(lines))
+
+    docs = (
+        db.query(Document)
+        .filter(Document.user_id == user.id)
+        .order_by(Document.uploaded_at.desc())
+        .limit(5)
+        .all()
+    )
+    if docs:
+        lines = ["【アップロード資料（直近）】"]
+        for doc in docs:
+            meta_parts: List[str] = []
+            if doc.doc_type:
+                meta_parts.append(doc.doc_type)
+            if doc.period_label:
+                meta_parts.append(doc.period_label)
+            meta = " / ".join(meta_parts)
+            title = getattr(doc, "title", None) or doc.filename or "無題"
+            lines.append(f"- {title}{f'（{meta}）' if meta else ''}")
+        pieces.append("\n".join(lines))
+
+    return pieces
+
+
 
 
 async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResponse:
@@ -177,24 +238,39 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
         free_text
         or option_label
         or conversation.main_concern
-        or (payload.category or "経営に関する相談")
+        or (payload.category or "????????")
     )
 
-    # --- ここから RAG コンテキスト取得 ---
     try:
-        context_chunks = await rag_service.retrieve_context(
+        rag_chunks = await rag_service.retrieve_context(
             db=db,
             user_id=user.id if user else None,
-            company_id=None,  # 将来 company_id が入ればここに差し替え
+            company_id=None,
             query=query_text,
             top_k=8,
         )
     except Exception:
         logger.exception("failed to retrieve RAG context")
-        context_chunks = []
+        rag_chunks = []
 
-    context_text = "\n\n".join(context_chunks) if context_chunks else "関連するコンテキストはまだ登録されていません。"
+    structured_chunks = _collect_structured_context(db, user, conversation)
+
+    all_chunks: List[str] = []
+    if rag_chunks:
+        all_chunks.extend(rag_chunks)
+    if structured_chunks:
+        all_chunks.extend(structured_chunks)
+
+    if all_chunks:
+        context_text = "\n\n".join(all_chunks)
+    else:
+        context_text = (
+            "?????????????????????????????????????????"
+            "?????????????????????????????"
+        )
+
     history_text = _history_as_text(history)
+
 
     user_prompt_text = (
         "以下は、この会社や似た事業者に関する過去の相談メモ・チャット・資料の抜粋です。"
