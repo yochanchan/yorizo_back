@@ -9,8 +9,10 @@ from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from app.core.openai_client import AzureNotConfiguredError, chat_completion_json
+from app.schemas.reports import LocalBenchmark
 from database import get_db
-from models import Conversation, Document, HomeworkTask, Message
+from models import CompanyProfile, Conversation, Document, HomeworkTask, Message
+from services.reports import build_local_benchmark
 
 # Included with prefix="/api" in main.py; use "/report" here to avoid double-prefix.
 router = APIRouter(prefix="/report", tags=["report"])
@@ -35,6 +37,7 @@ class ReportResponse(BaseModel):
     strengths: List[str]
     weaknesses: List[str]
     homework: List[ReportHomework]
+    local_benchmark: Optional[LocalBenchmark] = None
 
 
 class ReportEnvelope(BaseModel):
@@ -141,6 +144,32 @@ def get_report(conversation_id: str, db: Session = Depends(get_db)) -> ReportEnv
             .all()
         )
 
+        profile: Optional[CompanyProfile] = None
+        conversation_count_for_user = 0
+        user_pending_homework_count = 0
+        if conversation.user_id:
+            profile = (
+                db.query(CompanyProfile)
+                .filter(CompanyProfile.user_id == conversation.user_id)
+                .first()
+            )
+            conversation_count_for_user = (
+                db.query(Conversation)
+                .filter(Conversation.user_id == conversation.user_id)
+                .count()
+            )
+            user_pending_homework_count = (
+                db.query(HomeworkTask)
+                .filter(
+                    HomeworkTask.user_id == conversation.user_id,
+                    HomeworkTask.status != "done",
+                )
+                .count()
+            )
+        else:
+            conversation_count_for_user = len(messages)
+            user_pending_homework_count = len([task for task in homework if task.status != "done"])
+
         transcript = _build_transcript(messages)
         homework_text = _build_homework_text(homework)
         docs_context = _build_documents_context(documents)
@@ -175,16 +204,28 @@ def get_report(conversation_id: str, db: Session = Depends(get_db)) -> ReportEnv
                 )
             )
 
+        local_benchmark = None
+        try:
+            local_benchmark = build_local_benchmark(
+                profile,
+                conversation_count_for_user,
+                len(documents),
+                user_pending_homework_count,
+            )
+        except Exception:
+            logger.debug("Failed to build local benchmark snapshot", exc_info=True)
+
         report = ReportResponse(
             id=str(conversation.id),
-            title=conversation.title or "Yorizoとの相談記録",
+            title=conversation.title or "Yorizo??????",
             category=conversation.category,
             created_at=conversation.started_at or datetime.utcnow(),
-            summary=summary or ["サマリーはまだ生成されていません。"],
+            summary=summary or ["?????????????????"],
             financial_analysis=financial_analysis,
             strengths=strengths,
             weaknesses=weaknesses,
             homework=homework_items,
+            local_benchmark=local_benchmark,
         )
 
         return ReportEnvelope(exists=True, report=report)
