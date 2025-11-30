@@ -16,22 +16,14 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """
-あなたは日本語で回答する経営相談AI「Yorizo」です。
-- 1回の応答では短い状況整理と次に聞きたい質問を1つだけ返してください。
-- 「question」にはユーザーに投げかける短い質問だけを書いてください（1〜2文）。長い「状況の整理」「診断フロー（概要）」などは question に入れないでください。
-- 選択肢は3〜5個の短い日本語ラベルを提示します。id は英語の内部キーですが、label/value は日本語で書きます。id をユーザー向けテキストに含めないでください。
-- 全体で4〜5ステップ程度で完結させ、5問目では done=true を返してください。
-- 返却は必ず次のJSONのみ。余計なテキストは出力しないでください。
-{
-  "reply": string,
-  "question": string,
-  "options": [
-    { "id": "string", "label": "表示ラベル", "value": "保存用の値" }
-  ],
-  "allow_free_text": true,
-  "step": number,
-  "done": boolean
-}
+あなたは共感力の高い経営相談AI「Yorizo」です。以下のルールを厳守してJSONのみを返してください。
+- reply: 1文目で相手の感情に寄り添い（絵文字可）、2〜3文で状況整理や小さなヒントを伝える。
+- question: 次に聞きたいことだけを1〜2文で書く。説明文は入れない。
+- options: 3〜5個の短い日本語ラベル（必要に応じて絵文字）。idは内部キー、label / value は日本語で記載。
+- cta_buttons: 相談メモやレポートに誘導したいときのみ {id,label,action} の配列で返す。不要なら空配列または省略可。
+- allow_free_text: true のとき、自由入力を受け付ける前提で質問する。
+- step/done: step を1から順に更新し、5問目以降は done=true を優先する。
+- 返却キーは conversation_id, reply, question, options, cta_buttons, allow_free_text, step, done のみ。余計なテキストは禁止。
 """.strip()
 
 
@@ -100,7 +92,7 @@ def _find_option_label(messages: List[Message], option_id: str) -> Optional[str]
 
 
 def _history_as_text(messages: List[Message]) -> str:
-    """?????????????????????"""
+    """直近の会話を読みやすいテキストに整形する。"""
     lines: List[str] = []
     for msg in messages[-10:]:
         if msg.role == "assistant":
@@ -111,19 +103,19 @@ def _history_as_text(messages: List[Message]) -> str:
                 if reply:
                     lines.append(f"Yorizo: {reply}")
                 if question:
-                    lines.append(f"??: {question}")
+                    lines.append(f"質問: {question}")
             except Exception:
                 lines.append(f"Yorizo: {msg.content}")
         else:
-            lines.append(f"????: {msg.content}")
+            lines.append(f"ユーザー: {msg.content}")
     return "\n".join(lines)
 
 
 def _collect_structured_context(db: Session, user: Optional[User], conversation: Conversation) -> List[str]:
     """
-    /company, /memory, /documents に相当する情報を日本語テキストに整形する。
+    /company, /memory, /documents の情報を日本語テキストに整形して返す。
     """
-    del conversation  # 将来的に会話単位の要素を扱う余地を残す
+    del conversation  # 将来的に会話単位の情報を扱う余地を残す
     pieces: List[str] = []
     if not user:
         return pieces
@@ -170,14 +162,12 @@ def _collect_structured_context(db: Session, user: Optional[User], conversation:
                 meta_parts.append(doc.doc_type)
             if doc.period_label:
                 meta_parts.append(doc.period_label)
-            meta = " / ".join(meta_parts)
+            meta = " / ".join(meta_parts) if meta_parts else ""
             title = getattr(doc, "title", None) or doc.filename or "無題"
             lines.append(f"- {title}{f'（{meta}）' if meta else ''}")
         pieces.append("\n".join(lines))
 
     return pieces
-
-
 
 
 async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResponse:
@@ -194,7 +184,6 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
         .all()
     )
 
-    # selection / free text 判定
     selection = payload.selection
     choice_id = None
     choice_label = None
@@ -207,7 +196,6 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
         elif selection.type == "free_text":
             free_text = selection.text or payload.message
 
-    # 旧フィールドのフォールバック
     if not selection:
         choice_id = payload.selected_option_id
         free_text = payload.message
@@ -220,7 +208,6 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
 
     user_entries: List[str] = []
     if choice_id:
-        # choice_id は内部管理用。先頭にだけメモとして残す。
         user_entries.append(f"[choice_id:{choice_id}] {display_text}")
     else:
         user_entries.append(display_text.strip())
@@ -229,16 +216,14 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
         saved = _persist_message(db, conversation, "user", text)
         history.append(saved)
 
-    # 会話のメインテーマ（main_concern）がまだなければ最初の入力を保存
     if not conversation.main_concern and user_entries:
         conversation.main_concern = user_entries[0][:255]
 
-    # LLM に渡すクエリテキスト
     query_text = (
         free_text
         or option_label
         or conversation.main_concern
-        or (payload.category or "????????")
+        or (payload.category or "経営に関する相談")
     )
 
     try:
@@ -265,13 +250,11 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
         context_text = "\n\n".join(all_chunks)
     else:
         context_text = (
-            "?????????????????????????????????????????"
-            "?????????????????????????????"
+            "会社情報や資料はまだ十分に登録されていません。それでもユーザーの入力内容をもとに、"
+            "中小企業の経営相談として丁寧にヒアリングを進めてください。"
         )
 
     history_text = _history_as_text(history)
-
-
     user_prompt_text = (
         "以下は、この会社や似た事業者に関する過去の相談メモ・チャット・資料の抜粋です。"
         "これらを参考にしながら、ユーザーの現在の質問に日本語で回答してください。\n\n"
@@ -293,6 +276,7 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
         raw = json.loads(raw_json or "{}")
         raw.setdefault("options", [])
         raw.setdefault("allow_free_text", True)
+        raw.setdefault("cta_buttons", [])
 
         current_step_value = conversation.step or 0
         try:
@@ -304,6 +288,8 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
             provided_step = int(raw.get("step")) if raw.get("step") is not None else None
         except (TypeError, ValueError):
             provided_step = None
+
+        raw.pop("conversation_id", None)
 
         raw["step"] = provided_step if provided_step is not None else current_step_int + 1
         raw.setdefault("done", False)
@@ -326,7 +312,6 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
             detail="Yorizoとの通信中にエラーが発生しました。時間をおいてもう一度お試しください。",
         ) from exc
 
-    # 会話ステップ・ステータス更新
     prior_step_value = conversation.step or 0
     try:
         prior_step_int = int(prior_step_value)
@@ -340,7 +325,6 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
     db.add(conversation)
     db.commit()
 
-    # アシスタント側メッセージを保存（JSON そのまま）
     assistant_payload = result.model_dump()
     assistant_payload["conversation_id"] = conversation.id
     _persist_message(db, conversation, "assistant", json.dumps(assistant_payload, ensure_ascii=False))
@@ -350,6 +334,7 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
         reply=result.reply,
         question=result.question,
         options=result.options,
+        cta_buttons=result.cta_buttons,
         allow_free_text=result.allow_free_text,
         step=result.step,
         done=result.done,
