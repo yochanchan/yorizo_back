@@ -25,11 +25,18 @@ class ChatTurnRequest(BaseModel):
     category: Optional[str] = Field(None, description="High-level topic: sales/cash/hr/ops/other")
 
 
+class ChatCTAButton(BaseModel):
+    id: str
+    label: str
+    action: str
+
+
 class ChatTurnResponse(BaseModel):
     conversation_id: str
     reply: str
     question: str
     options: List[ChatOption] = Field(default_factory=list)
+    cta_buttons: Optional[List[ChatCTAButton]] = None
     allow_free_text: bool = True
     step: int = 1
     done: bool = False

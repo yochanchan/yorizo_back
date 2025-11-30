@@ -10,9 +10,19 @@ class LocalBenchmarkScore(BaseModel):
     score: Optional[int] = None
 
 
+class LocalBenchmarkAxis(BaseModel):
+    id: str
+    label: str
+    score: int
+
+
 class CompanyAnalysisCategory(BaseModel):
     category: str
     items: List[str]
+
+
+class LocalBenchmark(BaseModel):
+    axes: List[LocalBenchmarkAxis]
 
 
 class CompanyAnalysisReport(BaseModel):
@@ -25,5 +35,6 @@ class CompanyAnalysisReport(BaseModel):
     strengths: List[str]
     weaknesses: List[str]
     action_items: List[str]
+    local_benchmark: Optional[LocalBenchmark] = None
 
     model_config = ConfigDict(from_attributes=True)
