@@ -43,6 +43,11 @@ uvicorn main:app --reload --port 8000
 # 3) POST /api/rag/chat でコンテキスト付き回答
 ```
 
+## 本番 MySQL の事前スキーマ更新
+Azure Database (MySQL) にはローカル SQLite と差分があるため、デプロイ前に以下の SQL を実行してください。
+1. MySQL に接続
+2. `source db/migrations/20251129_add_consultation_bookings_columns.sql;`
+
 ## Environment variables
 - `DATABASE_URL`: full SQLAlchemy URL (optional; overrides DB_*), e.g. `sqlite:///./yorizo.db` or `mysql+pymysql://user:pass@host:3306/yorizo`  
   - If you supply an async driver (e.g., `mysql+asyncmy` or `sqlite+aiosqlite`), it will be normalized to a sync driver for the current engine.

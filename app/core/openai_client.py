@@ -149,6 +149,12 @@ async def generate_consultation_memo(
     """
     Summarize a conversation into consultation memo bullets (used elsewhere in the app).
     """
+    def _fallback_from_history() -> Tuple[List[str], List[str]]:
+        """Fallback memo when Azure OpenAI is not available."""
+        user_lines = [m.get("content") for m in messages if (m.get("role") == "user" and m.get("content"))]
+        summary = [str(txt) for txt in user_lines[-3:] if txt]
+        return summary, []
+
     profile_lines = []
     if company_profile:
         profile_lines = [f"{k}: {v}" for k, v in company_profile.items() if v]
@@ -167,7 +173,15 @@ async def generate_consultation_memo(
         prompt_messages.append({"role": "system", "content": "Company profile:\n" + "\n".join(profile_lines)})
     prompt_messages.extend(messages[-30:])
 
-    raw = chat_completion_json(prompt_messages)
+    try:
+        raw = chat_completion_json(prompt_messages)
+    except AzureNotConfiguredError:
+        logger.warning("Azure OpenAI is not configured; returning fallback memo.")
+        return _fallback_from_history()
+    except Exception:
+        logger.exception("Consultation memo generation failed; returning fallback memo.")
+        return _fallback_from_history()
+
     data = json.loads(raw or "{}")
     current = data.get("current_concerns") or []
     important = data.get("important_points_for_expert") or []
