@@ -15,11 +15,18 @@ url_obj = make_url(normalized_url)
 if url_obj.drivername.startswith("mysql") and url_obj.drivername != "mysql+pymysql":
     url_obj = url_obj.set(drivername="mysql+pymysql")
 
+# Ensure utf8mb4 for MySQL connections
+if url_obj.drivername.startswith("mysql"):
+    query = dict(url_obj.query) if url_obj.query else {}
+    query.setdefault("charset", "utf8mb4")
+    url_obj = url_obj.set(query=query)
+
 DATABASE_URL = url_obj.render_as_string(hide_password=False)
 
 connect_args: dict = {}
 if url_obj.drivername.startswith("mysql"):
     connect_args["ssl"] = {"ca": "/etc/ssl/certs/ca-certificates.crt"}
+    connect_args.setdefault("charset", "utf8mb4")
 
 # Log DSN without password for Azure diagnostics
 safe_url = url_obj.set(password="***").render_as_string(hide_password=False)

@@ -1,3 +1,4 @@
+import logging
 import os
 import uuid
 from datetime import datetime
@@ -14,6 +15,7 @@ from database import get_db
 from models import Document, User
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = Path(__file__).resolve().parent.parent / "data" / "uploads"
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
@@ -77,6 +79,7 @@ def _extract_text(filename: str, content: bytes, mime_type: str | None) -> str:
         return "[ファイルを受け取りました]"
 
 
+# Single-file upload endpoint (chat and documents pages both rely on this).
 @router.post("/documents/upload", response_model=DocumentUploadResponse)
 async def upload_document(
     file: UploadFile = File(...),
@@ -88,6 +91,8 @@ async def upload_document(
     db: Session = Depends(get_db),
 ) -> DocumentUploadResponse:
     _ensure_upload_dir()
+    if not (user_id or company_id or conversation_id):
+        raise HTTPException(status_code=400, detail="紐づけ用のIDがありません。user_id か conversation_id を指定してください。")
     contents = await file.read()
     size_bytes = len(contents)
     if size_bytes == 0:
@@ -104,14 +109,15 @@ async def upload_document(
     with open(save_path, "wb") as f:
         f.write(contents)
 
+    mime_type = file.content_type or "application/octet-stream"
     _ensure_user(db, user_id)
-    text_content = _extract_text(file.filename or "document", contents, file.content_type)
+    text_content = _extract_text(file.filename or "document", contents, mime_type)
     doc = Document(
         user_id=user_id,
         company_id=company_id,
         conversation_id=conversation_id,
         filename=file.filename or "document",
-        mime_type=file.content_type,
+        mime_type=mime_type,
         size_bytes=size_bytes,
         uploaded_at=datetime.utcnow(),
         content_text=text_content,
@@ -127,8 +133,8 @@ async def upload_document(
     try:
         await ingest_document(db, doc)
     except Exception:
+        logger.exception("failed to ingest document", extra={"document_id": doc.id})
         # Fail softly; document remains ingested=False
-        pass
 
     summary = (text_content[:140] + "...") if text_content and len(text_content) > 140 else (text_content or "")
     return DocumentUploadResponse(

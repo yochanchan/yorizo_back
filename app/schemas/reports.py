@@ -8,12 +8,17 @@ class LocalBenchmarkScore(BaseModel):
     label: str
     description: str
     score: Optional[int] = None
+    raw_value: Optional[float] = None
+    industry_avg: Optional[float] = None
+    thresholds: Optional[dict] = None
+    reason: Optional[str] = None
 
 
 class LocalBenchmarkAxis(BaseModel):
     id: str
     label: str
     score: int
+    reason: Optional[str] = None
 
 
 class CompanyAnalysisCategory(BaseModel):
