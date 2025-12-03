@@ -24,7 +24,21 @@ def _ensure_user(db: Session, user_id: str) -> User:
 async def get_company_profile(user_id: str, db: Session = Depends(get_db)) -> CompanyProfileResponse:
     profile = db.query(CompanyProfile).filter(CompanyProfile.user_id == user_id).first()
     if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found")
+        now = datetime.utcnow()
+        profile = CompanyProfile(
+            user_id=user_id,
+            company_name=None,
+            industry=None,
+            employees_range=None,
+            annual_sales_range=None,
+            location_prefecture=None,
+            years_in_business=None,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(profile)
+        db.commit()
+        db.refresh(profile)
     return CompanyProfileResponse.model_validate(profile, from_attributes=True)
 
 

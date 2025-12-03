@@ -17,11 +17,15 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "consultation_bookings",
-        sa.Column("status", sa.String(length=20), nullable=False, server_default="pending"),
-    )
-    op.alter_column("consultation_bookings", "status", server_default=None)
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    existing = [col["name"] for col in inspector.get_columns("consultation_bookings")]
+    if "status" not in existing:
+        op.add_column(
+            "consultation_bookings",
+            sa.Column("status", sa.String(length=20), nullable=False, server_default="pending"),
+        )
+        op.alter_column("consultation_bookings", "status", server_default=None)
 
 
 def downgrade() -> None:

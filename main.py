@@ -8,6 +8,7 @@ from api import (
     case_examples,
     chat,
     company_profile,
+    company_reports,
     conversations,
     diagnosis,
     documents,
@@ -69,6 +70,21 @@ def _ensure_sqlite_columns() -> None:
     add_column("consultation_bookings", "meeting_url", "TEXT")
     add_column("consultation_bookings", "line_contact", "TEXT")
 
+    add_column("company_profiles", "name", "TEXT")
+    add_column("company_profiles", "employees", "INTEGER")
+    add_column("company_profiles", "annual_revenue_range", "TEXT")
+
+    add_column("financial_statements", "cash_and_deposits", "NUMERIC")
+    add_column("financial_statements", "receivables", "NUMERIC")
+    add_column("financial_statements", "inventory", "NUMERIC")
+    add_column("financial_statements", "payables", "NUMERIC")
+    add_column("financial_statements", "borrowings", "NUMERIC")
+    add_column("financial_statements", "previous_sales", "NUMERIC")
+
+    add_column("companies", "name", "TEXT")
+    add_column("companies", "employees", "INTEGER")
+    add_column("companies", "annual_revenue_range", "TEXT")
+
 
 @app.on_event("startup")
 def on_startup() -> None:
@@ -88,6 +104,7 @@ app.add_middleware(
 app.include_router(chat.router)
 app.include_router(conversations.router, prefix="/api", tags=["conversations"])
 app.include_router(company_profile.router, prefix="/api", tags=["company-profile"])
+app.include_router(company_reports.router, prefix="/api", tags=["companies"])
 app.include_router(diagnosis.router, prefix="/api", tags=["diagnosis"])
 app.include_router(memory.router, prefix="/api", tags=["memory"])
 app.include_router(rag.router, prefix="/api", tags=["rag"])
