@@ -1,4 +1,5 @@
 import logging
+import os
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine.url import make_url
@@ -25,7 +26,9 @@ DATABASE_URL = url_obj.render_as_string(hide_password=False)
 
 connect_args: dict = {}
 if url_obj.drivername.startswith("mysql"):
-    connect_args["ssl"] = {"ca": "/etc/ssl/certs/ca-certificates.crt"}
+    # Allow overriding CA path for MySQL SSL; default keeps existing behavior
+    ca_path = os.getenv("DB_SSL_CA") or "/etc/ssl/certs/ca-certificates.crt"
+    connect_args["ssl"] = {"ca": ca_path}
     connect_args.setdefault("charset", "utf8mb4")
 
 # Log DSN without password for Azure diagnostics

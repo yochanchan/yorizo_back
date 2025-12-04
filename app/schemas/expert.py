@@ -32,6 +32,7 @@ class ExpertAvailabilityResponse(BaseModel):
 class ConsultationBookingRequest(BaseModel):
     expert_id: str
     user_id: Optional[str] = None
+    conversation_id: Optional[str] = None
     date: date
     time_slot: str
     channel: Literal["online", "in-person"]
@@ -46,6 +47,7 @@ class ConsultationBookingRequest(BaseModel):
 class ConsultationBookingResponse(BaseModel):
     booking_id: str
     expert_id: str
+    conversation_id: Optional[str] = None
     date: date
     time_slot: str
     channel: str

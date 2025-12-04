@@ -52,6 +52,7 @@ alembic upgrade head
 ```
 
 ## Environment variables
+- `APP_ENV`: `local` なら SQLite を使います。Azure など本番/ステージングでは `production` をセットし、必ず `DATABASE_URL` もしくは `DB_*` を設定してください。
 - `DATABASE_URL`: full SQLAlchemy URL (optional; overrides DB_*), e.g. `sqlite:///./yorizo.db` or `mysql+pymysql://user:pass@host:3306/yorizo`  
   - If you supply an async driver (e.g., `mysql+asyncmy` or `sqlite+aiosqlite`), it will be normalized to a sync driver for the current engine.
 - `DB_HOST`: default `localhost`
@@ -59,11 +60,13 @@ alembic upgrade head
 - `DB_USERNAME`: use this instead of a reserved `username` key in Azure App Service
 - `DB_PASSWORD`
 - `DB_NAME`
+- `DB_SSL_CA`: MySQL SSL の CA パス（省略時 `/etc/ssl/certs/ca-certificates.crt`）。Azure Database for MySQL は `DigiCertGlobalRootG2.crt.pem` などを指定してください。
 - `OPENAI_API_KEY`: OpenAI key
 - `OPENAI_MODEL_CHAT`: default `gpt-4.1-mini`
 - `OPENAI_MODEL_EMBEDDING`: default `text-embedding-3-small`
 - `AZURE_OPENAI_ENDPOINT`: e.g. `https://aoai-10th.openai.azure.com/`
 - `AZURE_OPENAI_API_KEY`: Azure OpenAI key
-- `AZURE_OPENAI_DEPLOYMENT`: deployment name used for chat (e.g., `gpt-4o-mini-yorizo`)
+- `AZURE_OPENAI_CHAT_DEPLOYMENT`: deployment name used for chat (e.g., `gpt-4o-mini-yorizo`)
+  - (フォールバックで `AZURE_OPENAI_DEPLOYMENT` も読み取りますが、今後は上記を設定してください)
 - `AZURE_OPENAI_API_VERSION`: default `2024-02-15-preview`
 - `CORS_ORIGINS`: CSV of allowed origins (default `http://localhost:3000`)
