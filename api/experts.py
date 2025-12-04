@@ -12,7 +12,7 @@ from app.schemas.expert import (
     ExpertResponse,
 )
 from database import get_db
-from models import ConsultationBooking, Expert, ExpertAvailability, User
+from models import ConsultationBooking, Conversation, Expert, ExpertAvailability, User
 
 router = APIRouter()
 
@@ -139,17 +139,29 @@ async def create_consultation_booking(
     if valid_slots and payload.time_slot not in valid_slots:
         raise HTTPException(status_code=400, detail="Selected time slot is not available")
 
+    conversation = None
+    if payload.conversation_id:
+        conversation = db.query(Conversation).filter(Conversation.id == payload.conversation_id).first()
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+    if conversation and payload.user_id and conversation.user_id and conversation.user_id != payload.user_id:
+        raise HTTPException(status_code=400, detail="Conversation user does not match booking user")
+
+    user_id_value = payload.user_id or (conversation.user_id if conversation else None)
+
     user: User | None = None
-    if payload.user_id:
-        user = db.query(User).filter(User.id == payload.user_id).first()
+    if user_id_value:
+        user = db.query(User).filter(User.id == user_id_value).first()
         if not user:
-            user = User(id=payload.user_id, nickname=None)
+            user = User(id=user_id_value, nickname=None)
             db.add(user)
             db.commit()
 
     booking = ConsultationBooking(
         expert_id=payload.expert_id,
         user_id=user.id if user else None,
+        conversation_id=conversation.id if conversation else payload.conversation_id,
         date=payload.date,
         time_slot=payload.time_slot,
         channel=payload.channel,
@@ -168,6 +180,7 @@ async def create_consultation_booking(
     return ConsultationBookingResponse(
         booking_id=booking.id,
         expert_id=booking.expert_id,
+        conversation_id=booking.conversation_id,
         date=booking.date,
         time_slot=booking.time_slot,
         channel=booking.channel,

@@ -1,4 +1,4 @@
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -31,8 +31,11 @@ class Settings(BaseSettings):
     openai_model_embedding: str = Field(default="text-embedding-3-small", env="OPENAI_MODEL_EMBEDDING")
     azure_openai_endpoint: str | None = Field(default=None, env="AZURE_OPENAI_ENDPOINT")
     azure_openai_api_key: str | None = Field(default=None, env="AZURE_OPENAI_API_KEY")
-    azure_openai_chat_deployment: str | None = Field(default=None, env="AZURE_OPENAI_CHAT_DEPLOYMENT")
-    azure_openai_api_version: str = Field(default="2025-04-01-preview", env="AZURE_OPENAI_API_VERSION")
+    azure_openai_chat_deployment: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AZURE_OPENAI_CHAT_DEPLOYMENT", "AZURE_OPENAI_DEPLOYMENT"),
+    )
+    azure_openai_api_version: str = Field(default="2024-02-15-preview", env="AZURE_OPENAI_API_VERSION")
     rag_persist_dir: str = Field(default="./rag_store", env="RAG_PERSIST_DIR")
     rag_enabled: bool = Field(default=True, env="ENABLE_RAG")
 
@@ -40,9 +43,16 @@ class Settings(BaseSettings):
 
 
 def get_db_url(settings: "Settings") -> str:
+    app_env = (settings.app_env or "").strip().lower()
+    if app_env in {"local", "dev", "development"}:
+        # 1) ローカルは常に SQLite を使い、MySQL+SSL 強制を避ける
+        return DEFAULT_SQLITE_URL
+
+    # 2) 明示的に DATABASE_URL があればそれを優先
     if settings.database_url:
         return settings.database_url
 
+    # 3) DB_* が揃っていれば MySQL 接続文字列を組み立てる
     if settings.db_username and settings.db_password and settings.db_name:
         return (
             f"mysql+asyncmy://{settings.db_username}:"
@@ -50,6 +60,11 @@ def get_db_url(settings: "Settings") -> str:
             f"{settings.db_name}"
         )
 
+    # 4) 本番系の指定があるのに DB 設定が無い場合は落として気づけるようにする
+    if app_env in {"production", "prod", "staging", "azure"}:
+        raise ValueError("APP_ENV is set to production/staging but DB configuration is missing")
+
+    # 5) それ以外は SQLite フォールバック
     return DEFAULT_SQLITE_URL
 
 

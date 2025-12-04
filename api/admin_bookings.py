@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.schemas.booking_admin import BookingDetail, BookingListItem, BookingListResponse, BookingUpdateRequest
 from database import get_db
-from models import ConsultationBooking
+from models import ConsultationBooking, Conversation
 
 router = APIRouter()
 
@@ -102,7 +102,15 @@ def update_booking(booking_id: str, payload: BookingUpdateRequest, db: Session =
     if payload.note is not None:
         booking.note = payload.note
     if payload.conversation_id is not None:
-        booking.conversation_id = payload.conversation_id
+        if payload.conversation_id == "":
+            booking.conversation_id = None
+        else:
+            conversation = db.query(Conversation).filter(Conversation.id == payload.conversation_id).first()
+            if not conversation:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            booking.conversation_id = conversation.id
+            if conversation.user_id and not booking.user_id:
+                booking.user_id = conversation.user_id
     if payload.meeting_url is not None:
         booking.meeting_url = payload.meeting_url
     if payload.line_contact is not None:
