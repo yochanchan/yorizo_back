@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.openai_client import AzureNotConfiguredError
 from database import get_db
-from models import CompanyProfile, Conversation, Document, Message
+from models import CompanyProfile, Conversation, Document, HomeworkTask, Message
 from services import rag as rag_service
 from services import reports as report_service
 
@@ -43,6 +43,15 @@ class FinanceSection(BaseModel):
     scores: List[ScoreItem]
 
 
+class SelfActionItem(BaseModel):
+    id: int
+    title: str
+    detail: Optional[str] = None
+    status: str
+    due_date: Optional[date] = None
+    updated_at: Optional[datetime] = None
+
+
 class ReportMeta(BaseModel):
     main_concern: Optional[str] = None
     period: str
@@ -54,6 +63,7 @@ class ReportContext(BaseModel):
     finance: Optional[FinanceSection] = None
     concerns: List[str]
     hints: List[str]
+    self_actions: List[SelfActionItem]
 
 
 class ReportEnvelope(BaseModel):
@@ -189,13 +199,32 @@ def get_report(conversation_id: str, db: Session = Depends(get_db)) -> ReportEnv
         conversation.main_concern or conversation.title or "経営に関する相談",
     )  # kept for future use
 
+    homework_tasks = (
+        db.query(HomeworkTask)
+        .filter(HomeworkTask.conversation_id == conversation.id)
+        .order_by(HomeworkTask.created_at.asc())
+        .all()
+    )
+    self_actions = [
+        SelfActionItem(
+            id=task.id,
+            title=task.title,
+            detail=task.detail,
+            status=task.status or "pending",
+            due_date=task.due_date,
+            updated_at=task.updated_at,
+        )
+        for task in homework_tasks
+    ]
+    pending_homework_count = sum(1 for task in homework_tasks if (task.status or "pending") != "done")
+
     finance_data = report_service.build_finance_section(
         profile=profile,
         documents=documents,
         conversation_count=db.query(Conversation).filter(Conversation.user_id == conversation.user_id).count()
         if conversation.user_id
         else len(messages),
-        pending_homework_count=0,
+        pending_homework_count=pending_homework_count,
     )
     finance_section = None
     if finance_data:
@@ -249,5 +278,6 @@ def get_report(conversation_id: str, db: Session = Depends(get_db)) -> ReportEnv
         finance=finance_section,
         concerns=concerns,
         hints=hints,
+        self_actions=self_actions,
     )
     return ReportEnvelope(exists=True, report=report)

@@ -72,6 +72,7 @@ class ConversationReport(BaseModel):
     summary: List[str]
     key_topics: List[str]
     homework: List[HomeworkTaskRead]
+    self_actions: List[HomeworkTaskRead] = []
 
     model_config = ConfigDict(from_attributes=True)
 

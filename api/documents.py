@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.rag.ingest import ingest_document
 from app.schemas.document import DocumentItem, DocumentListResponse, DocumentUploadResponse
+from services.financial_import import upsert_financial_statements
 from database import get_db
 from models import Document, User
 
@@ -137,6 +138,19 @@ async def upload_document(
         # Fail softly; document remains ingested=False
 
     summary = (text_content[:140] + "...") if text_content and len(text_content) > 140 else (text_content or "")
+    try:
+        suffix = Path(file.filename or "").suffix.lower()
+        is_local_benchmark = suffix in {".xlsx", ".xlsm"} and (
+            (doc_type or "").lower() in {"financial_statement", "local_benchmark"}
+            or "ローカル" in (file.filename or "")
+            or "benchmark" in (file.filename or "").lower()
+        )
+        if is_local_benchmark:
+            target_company_id = company_id or "1"
+            upsert_financial_statements(db, target_company_id, contents)
+    except Exception:
+        logger.exception("Failed to import financial statement from uploaded Excel")
+
     return DocumentUploadResponse(
         document_id=doc.id,
         filename=doc.filename,

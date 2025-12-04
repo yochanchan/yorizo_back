@@ -209,4 +209,5 @@ async def get_conversation_report(conversation_id: str, db: Session = Depends(ge
         summary=summary,
         key_topics=key_topics,
         homework=homework_tasks,
+        self_actions=homework_tasks,
     )
