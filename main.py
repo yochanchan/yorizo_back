@@ -1,3 +1,4 @@
+import logging
 import os
 from fastapi import FastAPI
 from sqlalchemy import text
@@ -22,6 +23,8 @@ from api import (
 from database import Base, engine
 import models  # noqa: F401
 from seed import seed_demo_data
+
+logger = logging.getLogger(__name__)
 
 default_origins = [
     "http://localhost:3000",
@@ -86,9 +89,26 @@ def _ensure_sqlite_columns() -> None:
     add_column("companies", "annual_revenue_range", "TEXT")
 
 
+def _should_create_all() -> bool:
+    env = (os.getenv("APP_ENV") or "").lower()
+    enable_flag = os.getenv("ENABLE_CREATE_ALL", "").lower() in {"1", "true", "yes"}
+    if engine.url.get_backend_name() == "sqlite":
+        return True
+    if env in {"local", "dev", "development"} or enable_flag:
+        return True
+    return False
+
+
 @app.on_event("startup")
 def on_startup() -> None:
-    Base.metadata.create_all(bind=engine)
+    if _should_create_all():
+        Base.metadata.create_all(bind=engine)
+    else:
+        logger.info(
+            "Skipping Base.metadata.create_all on %s (APP_ENV=%s); run migrations or create tables separately.",
+            engine.url.get_backend_name(),
+            os.getenv("APP_ENV"),
+        )
     _ensure_sqlite_columns()
     seed_demo_data()
 

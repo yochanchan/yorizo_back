@@ -22,6 +22,11 @@ from sqlalchemy.orm import relationship
 
 from database import Base
 
+# NOTE: MySQL requires FK columns to match the referenced column type exactly
+# (length, collation, unsigned flag, etc.). Keep all user PK/FK columns on this
+# shared type to avoid incompatibilities when creating foreign keys.
+USER_ID_TYPE = String(36)
+
 
 def default_uuid() -> str:
     return str(uuid4())
@@ -34,7 +39,7 @@ def utcnow() -> datetime:
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(String(36), primary_key=True, default=default_uuid)
+    id = Column(USER_ID_TYPE, primary_key=True, default=default_uuid)
     external_id = Column(String(255), nullable=True)
     nickname = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=utcnow)
@@ -54,7 +59,7 @@ class Conversation(Base):
     __tablename__ = "conversations"
 
     id = Column(String(36), primary_key=True, default=default_uuid)
-    user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    user_id = Column(USER_ID_TYPE, ForeignKey("users.id"), nullable=True)
     title = Column(String(255), nullable=True)
     started_at = Column(DateTime, default=utcnow)
     ended_at = Column(DateTime, nullable=True)
@@ -87,7 +92,7 @@ class Memory(Base):
     __tablename__ = "memories"
 
     id = Column(String(36), primary_key=True, default=default_uuid)
-    user_id = Column(String(36), ForeignKey("users.id"), nullable=False)
+    user_id = Column(USER_ID_TYPE, ForeignKey("users.id"), nullable=False)
     current_concerns = Column(Text, nullable=True)
     important_points = Column(Text, nullable=True)
     remembered_facts = Column(Text, nullable=True)
@@ -100,7 +105,7 @@ class Company(Base):
     __tablename__ = "companies"
 
     id = Column(String(36), primary_key=True, default=default_uuid)
-    user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    user_id = Column(USER_ID_TYPE, ForeignKey("users.id"), nullable=True, index=True)
     # Newer fields for canonical company summary
     name = Column(String(255), nullable=True)
     employees = Column(Integer, nullable=True)
@@ -124,7 +129,7 @@ class CompanyProfile(Base):
     __tablename__ = "company_profiles"
 
     id = Column(String(36), primary_key=True, default=default_uuid)
-    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, unique=True)
+    user_id = Column(USER_ID_TYPE, ForeignKey("users.id"), nullable=False, unique=True)
     company_name = Column(String(255), nullable=True)
     name = Column(String(255), nullable=True)
     industry = Column(String(255), nullable=True)
@@ -187,7 +192,7 @@ class ConsultationBooking(Base):
 
     id = Column(String(36), primary_key=True, default=default_uuid)
     expert_id = Column(String(36), ForeignKey("experts.id"), nullable=False)
-    user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    user_id = Column(USER_ID_TYPE, ForeignKey("users.id"), nullable=True)
     conversation_id = Column(String(36), ForeignKey("conversations.id"), nullable=True)
     date = Column(Date, nullable=False)
     time_slot = Column(String(50), nullable=False)
@@ -210,7 +215,7 @@ class Document(Base):
     __tablename__ = "documents"
 
     id = Column(String(36), primary_key=True, default=default_uuid)
-    user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    user_id = Column(USER_ID_TYPE, ForeignKey("users.id"), nullable=True)
     company_id = Column(String(36), nullable=True)
     conversation_id = Column(String(36), ForeignKey("conversations.id"), nullable=True)
     filename = Column(String(255), nullable=False)
@@ -262,7 +267,7 @@ class RAGDocument(Base):
     __table_args__ = {"sqlite_autoincrement": True}
 
     id = Column(Integer, primary_key=True, autoincrement=True, index=True)
-    user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    user_id = Column(USER_ID_TYPE, ForeignKey("users.id"), nullable=True, index=True)
     title = Column(String(512), nullable=False)
     source_type = Column(String(50), nullable=False, default="manual")
     source_id = Column(String(255), nullable=True)
@@ -280,7 +285,7 @@ class HomeworkTask(Base):
     __table_args__ = {"sqlite_autoincrement": True}
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(USER_ID_TYPE, ForeignKey("users.id"), nullable=False, index=True)
     conversation_id = Column(String(36), ForeignKey("conversations.id"), nullable=True, index=True)
     title = Column(String(255), nullable=False)
     detail = Column(Text, nullable=True)
