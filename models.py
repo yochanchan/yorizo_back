@@ -25,7 +25,8 @@ from database import Base
 # NOTE: MySQL requires FK columns to match the referenced column type exactly
 # (length, collation, unsigned flag, etc.). Keep all user PK/FK columns on this
 # shared type to avoid incompatibilities when creating foreign keys.
-USER_ID_TYPE = String(36)
+USER_ID_LENGTH = 36
+USER_ID_TYPE = String(USER_ID_LENGTH, collation="utf8mb4_unicode_ci")
 
 
 def default_uuid() -> str:
