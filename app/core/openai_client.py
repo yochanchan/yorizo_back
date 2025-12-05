@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import inspect
 import json
 import logging
-from functools import lru_cache
+import os
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from fastapi import HTTPException
-from openai import AzureOpenAI, OpenAI, OpenAIError
+from openai import AsyncOpenAI, AzureOpenAI, OpenAIError
 
 from app.core.config import settings
 
@@ -37,6 +38,9 @@ def _get_azure_client() -> AzureOpenAI:
     if azure_client is None:
         raise AzureNotConfiguredError("Azure OpenAI is not configured")
     return azure_client
+
+
+_client: AsyncOpenAI | None = None
 
 
 def chat_completion_json(
@@ -98,11 +102,17 @@ def chat_completion_text(
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 
 
-@lru_cache()
-def get_client() -> OpenAI:
-    if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set.")
-    return OpenAI(api_key=settings.openai_api_key)
+def get_client() -> AsyncOpenAI:
+    global _client
+    if _client is not None:
+        return _client
+
+    api_key = os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("AZURE_OPENAI_API_KEY か OPENAI_API_KEY のどちらも設定されていません。")
+
+    _client = AsyncOpenAI(api_key=api_key)
+    return _client
 
 
 async def generate_chat_reply(
@@ -138,6 +148,8 @@ async def embed_texts(texts: Union[str, List[str]]) -> List[List[float]]:
         model=model_name,
         input=input_texts,
     )
+    if inspect.isawaitable(resp):
+        resp = await resp
 
     return [item.embedding for item in resp.data]
 
