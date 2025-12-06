@@ -30,6 +30,7 @@ class Document(Base):
 
 class RAGDocument(Base):
     __tablename__ = "rag_documents"
+    __table_args__ = {"sqlite_autoincrement": True}
 
     id = Column(Integer, primary_key=True, autoincrement=True, index=True)
     user_id = Column(GUID_TYPE, ForeignKey("users.id"), nullable=True, index=True)

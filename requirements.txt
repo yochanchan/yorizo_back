@@ -6,6 +6,7 @@ pydantic-settings==2.12.0
 python-dotenv==1.2.1
 
 SQLAlchemy==2.0.44
+aiosqlite==0.21.0
 asyncmy==0.2.10
 pymysql==1.1.2
 alembic==1.17.2

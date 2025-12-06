@@ -2,9 +2,11 @@ from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
+DEFAULT_SQLITE_URL = "sqlite:///./yorizo.db"
 DRIVER_NORMALIZATION = {
     # async -> sync
     "mysql+asyncmy": "mysql+pymysql",
+    "sqlite+aiosqlite": "sqlite",
     # mysql connector flavors -> pymysql (default in requirements)
     "mysql+mysqlconnector": "mysql+pymysql",
     "mysql+mysqldb": "mysql+pymysql",
@@ -42,21 +44,16 @@ class Settings(BaseSettings):
 
 
 def get_db_url(settings: "Settings") -> str:
-    """
-    Resolve the database URL.
-
-    The application always expects a MySQL URL.
-    SQLite へのフォールバックや自動的なローカル SQLite 利用は行わず、
-    設定不備は例外として検出します。
-    """
     app_env = (settings.app_env or "").strip().lower()
+    if app_env in {"local", "dev", "development"}:
+        # 1) ローカルは常に SQLite を使い、MySQL+SSL 強制を避ける
+        return DEFAULT_SQLITE_URL
 
+    # 2) 明示的に DATABASE_URL があればそれを優先
     if settings.database_url:
-        url_obj = make_url(settings.database_url)
-        if not url_obj.drivername.startswith("mysql"):
-            raise ValueError(f"DATABASE_URL must be a MySQL URL (got {url_obj.drivername})")
         return settings.database_url
 
+    # 3) DB_* が揃っていれば MySQL 接続文字列を組み立てる
     if settings.db_username and settings.db_password and settings.db_name:
         return (
             f"mysql+asyncmy://{settings.db_username}:"
@@ -64,16 +61,17 @@ def get_db_url(settings: "Settings") -> str:
             f"{settings.db_name}"
         )
 
-    raise ValueError(
-        "Database configuration is missing. "
-        "Set a MySQL DATABASE_URL or DB_USERNAME/DB_PASSWORD/DB_NAME (APP_ENV is "
-        f"'{app_env or ''}')."
-    )
+    # 4) 本番系の指定があるのに DB 設定が無い場合は落として気づけるようにする
+    if app_env in {"production", "prod", "staging", "azure"}:
+        raise ValueError("APP_ENV is set to production/staging but DB configuration is missing")
+
+    # 5) それ以外は SQLite フォールバック
+    return DEFAULT_SQLITE_URL
 
 
 def normalize_db_url(url: str) -> str:
     """
-    Convert async or variant MySQL driver URLs to sync equivalents so they can be used
+    Convert async driver URLs to sync equivalents so they can be used
     with the current synchronous SQLAlchemy engine/session setup.
     """
     url_obj = make_url(url)
@@ -84,4 +82,3 @@ def normalize_db_url(url: str) -> str:
 
 
 settings = Settings()
-
