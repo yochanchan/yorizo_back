@@ -23,7 +23,6 @@ class Memory(Base):
 
 class HomeworkTask(Base):
     __tablename__ = "homework_tasks"
-    __table_args__ = {"sqlite_autoincrement": True}
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(GUID_TYPE, ForeignKey("users.id"), nullable=False, index=True)

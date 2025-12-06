@@ -1,8 +1,6 @@
 import logging
 import os
 from fastapi import FastAPI
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import (
@@ -21,7 +19,7 @@ from app.api import (
     report,
     reports,
 )
-from database import Base, engine
+from database import engine
 import models  # noqa: F401
 from seed import seed_demo_data
 
@@ -38,82 +36,18 @@ origins = list({*default_origins, *env_origins})
 app = FastAPI(title="Yorizo API", version="0.1.0")
 
 
-def _ensure_sqlite_columns() -> None:
-    if engine.dialect.name != "sqlite":
-        return
-
-    def add_column(table: str, column: str, definition: str) -> None:
-        if not column or not definition:
-            return
-        with engine.begin() as conn:
-            cols = [row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()]
-            # Some older local DBs may have a stray column named "TEXT" from past migrations.
-            # Ignore it and only add the new column when truly missing.
-            if column in cols:
-                return
-            try:
-                conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-            except Exception:
-                # If the column already exists or cannot be altered, continue without failing startup.
-                pass
-
-    add_column("conversations", "category", "TEXT")
-    add_column("conversations", "status", "TEXT DEFAULT 'in_progress'")
-    add_column("conversations", "step", "INTEGER")
-
-    add_column("documents", "company_id", "TEXT")
-    add_column("documents", "conversation_id", "TEXT")
-    add_column("documents", "doc_type", "TEXT")
-    add_column("documents", "period_label", "TEXT")
-    add_column("documents", "storage_path", "TEXT DEFAULT ''")
-    add_column("documents", "ingested", "INTEGER DEFAULT 0")
-
-    add_column("homework_tasks", "timeframe", "TEXT")
-    add_column("homework_tasks", "status", "TEXT DEFAULT 'pending'")
-    add_column("consultation_bookings", "conversation_id", "TEXT")
-    add_column("consultation_bookings", "meeting_url", "TEXT")
-    add_column("consultation_bookings", "line_contact", "TEXT")
-
-    add_column("company_profiles", "name", "TEXT")
-    add_column("company_profiles", "employees", "INTEGER")
-    add_column("company_profiles", "annual_revenue_range", "TEXT")
-
-    add_column("financial_statements", "cash_and_deposits", "NUMERIC")
-    add_column("financial_statements", "receivables", "NUMERIC")
-    add_column("financial_statements", "inventory", "NUMERIC")
-    add_column("financial_statements", "payables", "NUMERIC")
-    add_column("financial_statements", "borrowings", "NUMERIC")
-    add_column("financial_statements", "previous_sales", "NUMERIC")
-
-    add_column("companies", "name", "TEXT")
-    add_column("companies", "employees", "INTEGER")
-    add_column("companies", "annual_revenue_range", "TEXT")
-
-
-def _should_create_all() -> bool:
-    env = (os.getenv("APP_ENV") or "").lower()
-    enable_flag = os.getenv("ENABLE_CREATE_ALL", "").lower() in {"1", "true", "yes"}
-    if engine.url.get_backend_name() == "sqlite":
-        return True
-    if env in {"local", "dev", "development"} or enable_flag:
-        return True
-    return False
-
-
 @app.on_event("startup")
 def on_startup() -> None:
-    if _should_create_all():
-        try:
-            Base.metadata.create_all(bind=engine)
-        except SQLAlchemyError as exc:
-            logger.warning("Base.metadata.create_all failed; continuing without fatal error: %s", exc)
+    try:
+        with engine.connect() as connection:
+            connection.execute("SELECT 1")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Database connectivity check failed during startup: %s", exc)
+        # Avoid crashing the process to keep health endpoint reachable,
+        # but clearly surface the issue in logs.
     else:
-        logger.info(
-            "Skipping Base.metadata.create_all on %s (APP_ENV=%s); run migrations or create tables separately.",
-            engine.url.get_backend_name(),
-            os.getenv("APP_ENV"),
-        )
-    _ensure_sqlite_columns()
+        logger.info("Database connectivity check succeeded on %s", engine.url.get_backend_name())
+
     seed_demo_data()
 
 
