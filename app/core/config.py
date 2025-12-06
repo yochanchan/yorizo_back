@@ -15,30 +15,42 @@ DRIVER_NORMALIZATION = {
 
 
 class Settings(BaseSettings):
-    db_host: str = Field(default="localhost", env="DB_HOST")
-    db_port: int = Field(default=3306, env="DB_PORT")
+    db_host: str = Field(default="localhost", validation_alias=AliasChoices("DB_HOST"))
+    db_port: int = Field(default=3306, validation_alias=AliasChoices("DB_PORT"))
     # NOTE: Azure App Service cannot use an app setting named "username";
     # use DB_USERNAME instead for environment configuration.
-    db_username: str | None = Field(default=None, env="DB_USERNAME")
-    db_password: str | None = Field(default=None, env="DB_PASSWORD")
+    db_username: str | None = Field(default=None, validation_alias=AliasChoices("DB_USERNAME"))
+    db_password: str | None = Field(default=None, validation_alias=AliasChoices("DB_PASSWORD"))
     # Azure production DB name defaults to "yorizo" when not provided explicitly.
-    db_name: str | None = Field(default="yorizo", env="DB_NAME")
-    database_url: str | None = Field(default=None, env="DATABASE_URL")
-    app_env: str | None = Field(default=None, env="APP_ENV")
+    db_name: str | None = Field(default="yorizo", validation_alias=AliasChoices("DB_NAME"))
+    database_url: str | None = Field(default=None, validation_alias=AliasChoices("DATABASE_URL"))
+    app_env: str | None = Field(default=None, validation_alias=AliasChoices("APP_ENV"))
 
-    openai_api_key: str | None = Field(default=None, env="OPENAI_API_KEY")
-    openai_model_chat: str = Field(default="gpt-4.1-mini", env="OPENAI_MODEL_CHAT")
-    openai_model_embedding: str = Field(default="text-embedding-3-small", env="OPENAI_MODEL_EMBEDDING")
-    openai_base_url: str | None = Field(default=None, env="OPENAI_BASE_URL")
-    azure_openai_endpoint: str | None = Field(default=None, env="AZURE_OPENAI_ENDPOINT")
-    azure_openai_api_key: str | None = Field(default=None, env="AZURE_OPENAI_API_KEY")
+    openai_api_key: str | None = Field(default=None, validation_alias=AliasChoices("OPENAI_API_KEY"))
+    openai_model_chat: str = Field(default="gpt-4.1-mini", validation_alias=AliasChoices("OPENAI_MODEL_CHAT"))
+    openai_model_embedding: str = Field(
+        default="text-embedding-3-small",
+        validation_alias=AliasChoices("OPENAI_MODEL_EMBEDDING"),
+    )
+    openai_base_url: str | None = Field(default=None, validation_alias=AliasChoices("OPENAI_BASE_URL"))
+    azure_openai_endpoint: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AZURE_OPENAI_ENDPOINT"),
+    )
+    azure_openai_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AZURE_OPENAI_API_KEY"),
+    )
     azure_openai_chat_deployment: str | None = Field(
         default=None,
         validation_alias=AliasChoices("AZURE_OPENAI_CHAT_DEPLOYMENT", "AZURE_OPENAI_DEPLOYMENT"),
     )
-    azure_openai_api_version: str = Field(default="2024-02-15-preview", env="AZURE_OPENAI_API_VERSION")
-    rag_persist_dir: str = Field(default="./rag_store", env="RAG_PERSIST_DIR")
-    rag_enabled: bool = Field(default=True, env="ENABLE_RAG")
+    azure_openai_api_version: str = Field(
+        default="2024-02-15-preview",
+        validation_alias=AliasChoices("AZURE_OPENAI_API_VERSION"),
+    )
+    rag_persist_dir: str = Field(default="./rag_store", validation_alias=AliasChoices("RAG_PERSIST_DIR"))
+    rag_enabled: bool = Field(default=True, validation_alias=AliasChoices("ENABLE_RAG"))
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
