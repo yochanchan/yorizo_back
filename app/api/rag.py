@@ -2,8 +2,6 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-
-from app.core.env import is_test_env
 from app.core.openai_client import chat_text_safe
 from app.rag.store import (
     EmbeddingUnavailableError,
@@ -127,13 +125,6 @@ async def rag_search(payload: RagQueryRequest) -> RagQueryResponse:
 async def rag_chat_endpoint(payload: RagChatRequest) -> RagChatResponse:
     try:
         owner_id = _resolve_owner_id(payload.user_id, payload.company_id)
-
-        if is_test_env():
-            docs = await fetch_recent_documents(limit=payload.top_k, user_id=owner_id, company_id=payload.company_id)
-            contexts = [d["text"] for d in docs]
-            citations = [int(d["id"]) for d in docs if d.get("id") is not None]
-            return RagChatResponse(answer="mocked answer", contexts=contexts, citations=citations)
-
         query_text: str | None = payload.question
         if payload.messages:
             for msg in reversed(payload.messages):
