@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.rag.store import add_documents
-from models import Document
+from app.models import Document
 
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 120

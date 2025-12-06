@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.schemas.company_report import CompanyReportResponse, QualitativeBlock, RadarSection
 from database import get_db
-from services.company_report import build_company_report
+from app.services.company_report import build_company_report
 
 router = APIRouter(prefix="/companies", tags=["companies"])
 logger = logging.getLogger(__name__)

@@ -12,7 +12,7 @@ from app.schemas.expert import (
     ExpertResponse,
 )
 from database import get_db
-from models import ConsultationBooking, Conversation, Expert, ExpertAvailability, User
+from app.models import ConsultationBooking, Conversation, Expert, ExpertAvailability, User
 
 router = APIRouter()
 
@@ -25,22 +25,22 @@ def _seed_experts_if_needed(db: Session) -> None:
         name="田中 経営太郎",
         title="売上拡大・資金繰り支援",
         organization="福岡県よろず支援拠点",
-        tags=json.dumps(["売上拡大", "飲食店支援", "資金繰り"]),
+        tags=json.dumps(["売上拡大", "飲食店支援", "資金繰り"], ensure_ascii=False),
         rating=4.8,
         review_count=124,
         location_prefecture="福岡県",
-        description="元飲食店経営者。20年の現場経験とマーケティング支援の実績で、数字を見ながら現場が回る仕組み作りをサポートします。",
+        description="飲食店経営の経験とマーケティング支援の実績で、数字を見ながら現場が回る仕組みを提案します。",
         avatar_url=None,
     )
     expert2 = Expert(
         name="佐藤 真奈美",
         title="人材・IT/DX 専門",
         organization="福岡県よろず支援拠点",
-        tags=json.dumps(["人材採用", "IT/DX", "補助金"]),
+        tags=json.dumps(["人材採用", "IT/DX", "補助金"], ensure_ascii=False),
         rating=4.7,
         review_count=98,
         location_prefecture="福岡県",
-        description="中小企業のバックオフィス改善と補助金活用に強み。採用・定着の仕組みとクラウド導入をセットで提案します。",
+        description="バックオフィス改善と補助金活用に強み。採用・定着とクラウド導入をセットで提案します。",
         avatar_url=None,
     )
     db.add_all([expert1, expert2])

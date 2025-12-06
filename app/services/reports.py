@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
+from fastapi import HTTPException
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.schemas.reports import (
@@ -13,16 +16,37 @@ from app.schemas.reports import (
     LocalBenchmarkAxis,
     LocalBenchmarkScore,
 )
-from app.core.openai_client import AzureNotConfiguredError, chat_completion_json
-from models import CompanyProfile, Document, Message
-from services.company_report import build_company_report
+from app.core.openai_client import AzureNotConfiguredError, LlmError, LlmResult, chat_completion_json
+from app.models import CompanyProfile, Conversation, Document, HomeworkTask, HomeworkStatus, Message
+from app.services.company_report import build_company_report
+
+logger = logging.getLogger(__name__)
+
+
+def _chat_json_result(
+    prompt_id: str,
+    messages: Sequence[Dict[str, Any]],
+    *,
+    max_tokens: int | None = None,
+) -> LlmResult[Any]:
+    try:
+        raw = chat_completion_json(messages=messages, max_tokens=max_tokens)
+        data = json.loads(raw or "{}")
+        return LlmResult(ok=True, value=data)
+    except AzureNotConfiguredError as exc:
+        return LlmResult(ok=False, error=LlmError(code="not_configured", message=str(exc)))
+    except HTTPException as exc:
+        retryable = exc.status_code >= 500
+        return LlmResult(
+            ok=False,
+            error=LlmError(code="upstream_http_error", message=str(exc.detail), retryable=retryable),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LLM json generation failed for %s: %s", prompt_id, exc)
+        return LlmResult(ok=False, error=LlmError(code="bad_json", message=str(exc), retryable=False))
 
 
 def _scale_positive(value: Optional[float], thresholds: List[float]) -> int:
-    """
-    Convert a numeric value into a 1-5 score using ascending thresholds.
-    thresholds: list of four breakpoints for 2,3,4,5 boundaries.
-    """
     if value is None:
         return 3
     score = 1
@@ -33,9 +57,6 @@ def _scale_positive(value: Optional[float], thresholds: List[float]) -> int:
 
 
 def _scale_inverse(value: Optional[float], thresholds: List[float]) -> int:
-    """
-    Lower is better. thresholds ascending; below first ->5, above last ->1.
-    """
     if value is None:
         return 3
     score = 5
@@ -73,7 +94,7 @@ def _finance_scores(kpis: Dict[str, float]) -> List[LocalBenchmarkScore]:
         "labor_productivity": ("労働生産性", "従業員1人あたりの営業利益"),
         "ebitda_debt_ratio": ("EBITDA有利子負債倍率", "借入金とキャッシュのバランス"),
         "operating_working_capital_period": ("営業運転資本回転期間（月）", "資金の回転期間"),
-        "equity_ratio": ("自己資本比率", "財務健全性の指標"),
+        "equity_ratio": ("自己資本比率", "財務健全性の目安"),
     }
     scores: List[LocalBenchmarkScore] = []
     for key, (label, desc) in label_map.items():
@@ -132,7 +153,7 @@ def _llm_summary(kpis: Dict[str, float], concerns: List[str]) -> str:
     if not kpis and not concerns:
         return "最新の会話と決算データをまとめています。"
     prompt = (
-        "あなたは中小企業診断士です。以下のKPIと最近の相談テーマを踏まえて、会社の現状を1-2文で日本語でまとめてください。\n"
+        "あなたは中小企業診断士です。以下のKPIと最近の相談テーマを踏まえて、会社の現状を1-2文でまとめてください。\n"
         f"KPI: {json.dumps(kpis, ensure_ascii=False)}\n"
         f"相談テーマ: {json.dumps(concerns, ensure_ascii=False)}"
     )
@@ -187,7 +208,7 @@ def build_finance_section(
     if has_profile and profile.company_name:
         overview_parts.append(f"{profile.company_name}の登録情報を基にしています。")
     if doc_count:
-        overview_parts.append(f"{doc_count}件の資料（決算・試算表など）を参照しました。")
+        overview_parts.append(f"{doc_count}件の資料（決算書や試算表など）を参照しました。")
     else:
         overview_parts.append("まだ決算資料がアップロードされていないため、登録情報と会話履歴から推測しています。")
     if pending_homework_count:
@@ -200,7 +221,7 @@ def build_finance_section(
             key="documents_registered",
             label="財務資料の登録状況",
             raw=float(doc_count),
-            reason="アップロード済みの資料数を基に算出。",
+            reason="アップロード済みの資料数を基に算定。",
             not_enough_data=doc_count == 0,
         )
     )
@@ -214,7 +235,7 @@ def build_finance_section(
     scores.append(
         _score_entry(
             key="profile_completeness",
-            label="会社プロフィールの充実度",
+            label="会社プロフィールの充足度",
             raw=round(profile_score * 100, 1) if has_profile else None,
             reason="会社名・業種・規模などの登録状況を基に評価。",
             not_enough_data=not has_profile,
@@ -264,6 +285,7 @@ def generate_concerns(
     conversation_text: str,
     main_concern: Optional[str],
     documents_summary: Sequence[str],
+    history_messages: Sequence[Message],
 ) -> List[str]:
     system_prompt = "あなたは中小企業診断士です。入力を読み、経営者が気にしている課題を日本語で整理してください。"
     payload = {
@@ -272,21 +294,24 @@ def generate_concerns(
         "documents": list(documents_summary),
     }
     user_prompt = (
-        "以下の情報から、経営者が抱えている課題やモヤモヤを日本語の短い文章で3件以内まとめ、必ずJSON配列で返してください。\n"
+        "以下の情報から、経営者が抱えている課題やモヤモヤを日本語で短い文章で3件以内でまとめ、必ずJSON配列で返してください。\n"
         f"{json.dumps(payload, ensure_ascii=False)}"
     )
-    raw = chat_completion_json(
+    result = _chat_json_result(
+        "LLM-REPORT-01-v1",
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
         max_tokens=400,
     )
-    data = json.loads(raw or "[]")
+    data = result.value if result.ok else None
     if isinstance(data, dict) and "concerns" in data:
         data = data["concerns"]
     if not isinstance(data, list):
-        raise ValueError("concerns response must be a list")
+        if not result.ok:
+            logger.warning("concerns fallback triggered: %s", result.error)
+        return fallback_concerns(history_messages)
     concerns = [str(item).strip() for item in data if str(item).strip()]
     if not concerns:
-        raise ValueError("concerns response was empty")
+        return fallback_concerns(history_messages)
     return concerns
 
 
@@ -325,29 +350,185 @@ def generate_hints(
         },
     }
     user_prompt = (
-        "以下の情報を踏まえて、経営者への提案や次の打ち手を日本語で3件以内列挙してください。必ずJSON配列で返してください。\n"
+        "以下の情報を踏まえて、経営者への提案や次の打ち手を日本語で3件以内で挙げてください。必ずJSON配列で返してください。\n"
         f"{json.dumps(payload, ensure_ascii=False)}"
     )
-    raw = chat_completion_json(
+    result = _chat_json_result(
+        "LLM-REPORT-01-v1",
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
         max_tokens=400,
     )
-    data = json.loads(raw or "[]")
+    data = result.value if result.ok else None
     if isinstance(data, dict) and "hints" in data:
         data = data["hints"]
     if not isinstance(data, list):
-        raise ValueError("hints response must be a list")
+        if not result.ok:
+            logger.warning("hints fallback triggered: %s", result.error)
+        return fallback_hints()
     hints = [str(item).strip() for item in data if str(item).strip()]
     if not hints:
-        raise ValueError("hints response was empty")
+        return fallback_hints()
     return hints
 
 
 def fallback_hints() -> List[str]:
     return [
-        "最新の会話と宿題の内容をもとに、次回までに確認したい論点を整理してください。",
+        "最新の会話と宿題の結果をもとに、次回までに確認したい論点を整理してください。",
         "決算資料をアップロードすると、より精度の高いアドバイスが可能になります。",
     ]
+
+
+def _format_period(messages: List[Message], conversation: Conversation) -> str:
+    if messages:
+        start = messages[0].created_at or conversation.started_at or datetime.utcnow()
+        end = messages[-1].created_at or conversation.started_at or datetime.utcnow()
+    else:
+        start = conversation.started_at or datetime.utcnow()
+        end = conversation.started_at or datetime.utcnow()
+    start_label = f"{start.year}年{start.month}月"
+    end_label = f"{end.year}年{end.month}月"
+    if start_label == end_label:
+        return f"{start_label}のチャット相談"
+    return f"{start_label}〜{end_label}に実施したチャット相談"
+
+
+def _build_sources(profile: Optional[CompanyProfile], documents: List[Document], messages: List[Message]) -> List[str]:
+    sources: List[str] = []
+    if messages:
+        sources.append("チャット相談の履歴")
+    if profile:
+        sources.append("会社プロフィールの登録情報")
+    for doc in documents:
+        title = getattr(doc, "label", None) or getattr(doc, "original_filename", None) or getattr(doc, "filename", None) or "資料"
+        label = "アップロードされた資料"
+        if doc.doc_type == "financial_statement":
+            label = "アップロードされた決算書"
+        elif doc.doc_type == "trial_balance":
+            label = "アップロードされた試算表"
+        elif doc.doc_type:
+            label = f"アップロードされた{doc.doc_type}"
+        if doc.period_label:
+            sources.append(f"{label}（{doc.period_label}） {title}")
+        else:
+            sources.append(f"{label}: {title}")
+    return sources
+
+
+def _build_documents_context(documents: List[Document]) -> List[str]:
+    snippets: List[str] = []
+    for doc in documents:
+        title = getattr(doc, "label", None) or getattr(doc, "original_filename", None) or getattr(doc, "filename", None) or "資料"
+        meta_parts: List[str] = []
+        if doc.doc_type:
+            meta_parts.append(doc.doc_type)
+        if doc.period_label:
+            meta_parts.append(doc.period_label)
+        meta = " / ".join(meta_parts)
+        preview = (doc.content_text or "").strip()
+        if preview:
+            preview = preview[:120]
+            snippets.append(f"{title}{f'（{meta}）' if meta else ''}: {preview}")
+        else:
+            snippets.append(f"{title}{f'（{meta}）' if meta else ''}")
+    return snippets
+
+
+def _build_conversation_text(messages: List[Message]) -> str:
+    lines: List[str] = []
+    for msg in messages[-40:]:
+        role = "ユーザー" if msg.role == "user" else "yorizo"
+        stamp = msg.created_at.isoformat() if msg.created_at else ""
+        lines.append(f"{stamp} {role}: {msg.content}")
+    return "\n".join(lines)
+
+
+def build_conversation_report_data(db: Session, conversation_id: str) -> Optional[Dict[str, Any]]:
+    conversation = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+    if not conversation:
+        return None
+
+    messages = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.asc())
+        .all()
+    )
+
+    doc_filters = [Document.conversation_id == conversation_id]
+    if conversation.user_id:
+        doc_filters.extend([Document.user_id == conversation.user_id, Document.company_id == conversation.user_id])
+    documents = (
+        db.query(Document)
+        .filter(or_(*doc_filters))
+        .order_by(Document.uploaded_at.desc())
+        .limit(20)
+        .all()
+    )
+    profile = None
+    if conversation.user_id:
+        profile = (
+            db.query(CompanyProfile)
+            .filter(CompanyProfile.user_id == conversation.user_id)
+            .first()
+        )
+
+    meta = {
+        "main_concern": conversation.main_concern,
+        "period": _format_period(messages, conversation),
+        "sources": _build_sources(profile, documents, messages),
+    }
+
+    conversation_text = _build_conversation_text(messages)
+    docs_context = _build_documents_context(documents)
+
+    homework_tasks = (
+        db.query(HomeworkTask)
+        .filter(HomeworkTask.conversation_id == conversation.id)
+        .order_by(HomeworkTask.created_at.asc())
+        .all()
+    )
+    pending_homework_count = sum(
+        1 for task in homework_tasks if (task.status or HomeworkStatus.PENDING.value) != HomeworkStatus.DONE.value
+    )
+
+    finance_data = build_finance_section(
+        profile=profile,
+        documents=documents,
+        conversation_count=db.query(Conversation).filter(Conversation.user_id == conversation.user_id).count()
+        if conversation.user_id
+        else len(messages),
+        pending_homework_count=pending_homework_count,
+    )
+
+    concerns = generate_concerns(
+        conversation_text=conversation_text,
+        main_concern=conversation.main_concern,
+        documents_summary=docs_context,
+        history_messages=messages,
+    )
+
+    hints = generate_hints(
+        main_concern=conversation.main_concern,
+        concerns=concerns,
+        finance_section=finance_data,
+        documents_summary=docs_context,
+        profile=profile,
+    )
+
+    return {
+        "conversation": conversation,
+        "messages": messages,
+        "documents": documents,
+        "profile": profile,
+        "meta": meta,
+        "conversation_text": conversation_text,
+        "docs_context": docs_context,
+        "homework_tasks": homework_tasks,
+        "finance_data": finance_data,
+        "pending_homework_count": pending_homework_count,
+        "concerns": concerns,
+        "hints": hints,
+    }
 
 
 def build_company_analysis_report(db: Session, company_id: str) -> CompanyAnalysisReport:

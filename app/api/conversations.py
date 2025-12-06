@@ -6,16 +6,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.openai_client import generate_consultation_memo
+from app.models import ConsultationMemo, Conversation, HomeworkTask, Message, User
+from app.models.enums import ConversationStatus
 from app.schemas.conversation import (
     ConsultationMemoResponse,
     ConversationDetail,
     ConversationListResponse,
     ConversationMessage,
-    ConversationSummary,
     ConversationReport,
+    ConversationSummary,
 )
 from database import get_db
-from models import ConsultationMemo, Conversation, Message, User, HomeworkTask
 
 router = APIRouter()
 
@@ -107,7 +108,7 @@ async def list_conversations(
                 title=_conversation_title(conv),
                 date=started.date().isoformat(),
                 category=conv.category,
-                status=conv.status or "in_progress",
+                status=conv.status or ConversationStatus.IN_PROGRESS.value,
             )
         )
     return ConversationListResponse(conversations=summaries)
@@ -132,11 +133,7 @@ async def get_consultation_memo(conversation_id: str, db: Session = Depends(get_
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationDetail)
 async def get_conversation_detail(conversation_id: str, db: Session = Depends(get_db)) -> ConversationDetail:
-    conv = (
-        db.query(Conversation)
-        .filter(Conversation.id == conversation_id)
-        .first()
-    )
+    conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
@@ -152,7 +149,7 @@ async def get_conversation_detail(conversation_id: str, db: Session = Depends(ge
         title=title,
         started_at=conv.started_at,
         category=conv.category,
-        status=conv.status or "in_progress",
+        status=conv.status or ConversationStatus.IN_PROGRESS.value,
         step=conv.step,
         messages=[
             ConversationMessage(

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.env import is_test_env
-from app.core.openai_client import generate_chat_reply
+from app.core.openai_client import chat_text_safe
 from app.rag.store import (
     EmbeddingUnavailableError,
     fetch_recent_documents,
@@ -22,11 +22,11 @@ from app.schemas.rag import (
     RagSimilarDocument,
 )
 from database import get_db
-from models import RAGDocument
+from app.models import RAGDocument
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-FALLBACK_RAG_MESSAGE = "AI integration is not configured; document search and summarization are currently unavailable."
+FALLBACK_RAG_MESSAGE = "AI 連携が利用できません。資料をご確認のうえ、専門家にご相談ください。"
 
 
 def _resolve_owner_id(user_id: str | None, company_id: str | None) -> str | None:
@@ -179,9 +179,12 @@ async def rag_chat_endpoint(payload: RagChatRequest) -> RagChatResponse:
         if not any(m.get("role") == "user" for m in messages):
             messages.append({"role": "user", "content": query_text})
 
-        answer = await generate_chat_reply(messages, with_system_prompt=False)
+        llm_result = await chat_text_safe("LLM-RAG-01-v1", messages)
+        if not llm_result.ok or not llm_result.value:
+            logger.warning("rag chat fallback: %s", llm_result.error)
+            return RagChatResponse(answer=FALLBACK_RAG_MESSAGE, contexts=[], citations=[])
 
-        return RagChatResponse(answer=answer, contexts=context_texts, citations=citations)
+        return RagChatResponse(answer=llm_result.value, contexts=context_texts, citations=citations)
     except EmbeddingUnavailableError as exc:
         logger.error("%s (%s)", FALLBACK_RAG_MESSAGE, exc)
         return RagChatResponse(answer=FALLBACK_RAG_MESSAGE, contexts=[], citations=[])

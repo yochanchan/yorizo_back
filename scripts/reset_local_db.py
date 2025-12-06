@@ -5,7 +5,7 @@ import sys
 from sqlalchemy.exc import SQLAlchemyError
 
 import database
-from models import Base
+from database import Base
 
 
 def main() -> int:

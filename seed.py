@@ -6,7 +6,7 @@ from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from database import Base, SessionLocal, engine
-from models import Company, Conversation, FinancialStatement, Memory, Message, User
+from app.models import Company, Conversation, FinancialStatement, Memory, Message, User
 
 logger = logging.getLogger(__name__)
 

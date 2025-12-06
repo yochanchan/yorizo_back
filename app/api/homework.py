@@ -14,8 +14,9 @@ from app.schemas.homework import (
     HomeworkTaskUpdate,
     HomeworkTaskBase,
 )
+from app.models.enums import HomeworkStatus
 from database import get_db
-from models import HomeworkTask, User
+from app.models import HomeworkTask, User
 
 router = APIRouter()
 
@@ -33,19 +34,16 @@ def _ensure_user(db: Session, user_id: str) -> User:
 @router.get("/homework", response_model=List[HomeworkTaskRead])
 def list_homework_tasks(
     user_id: str = Query(..., description="User ID"),
-    status_filter: Optional[str] = Query(
-        None, regex="^(pending|done)$", description="Filter by status (pending|done)"
+    status_filter: Optional[HomeworkStatus] = Query(
+        None, description="Filter by status (pending|done)"
     ),
     db: Session = Depends(get_db),
 ) -> List[HomeworkTask]:
-    if status_filter and status_filter not in {"pending", "done"}:
-        raise HTTPException(status_code=400, detail="Invalid status")
-
     query = db.query(HomeworkTask).filter(HomeworkTask.user_id == user_id)
     if status_filter:
-        query = query.filter(HomeworkTask.status == status_filter)
+        query = query.filter(HomeworkTask.status == status_filter.value)
 
-    status_order = case((HomeworkTask.status == "pending", 0), else_=1)
+    status_order = case((HomeworkTask.status == HomeworkStatus.PENDING.value, 0), else_=1)
     due_date_nulls_last = case((HomeworkTask.due_date.is_(None), 1), else_=0)
     tasks = (
         query.order_by(
@@ -68,7 +66,7 @@ def create_homework_task(payload: HomeworkTaskCreate, db: Session = Depends(get_
         title=payload.title,
         detail=payload.detail,
         category=payload.category,
-        status=payload.status or "pending",
+        status=(payload.status or HomeworkStatus.PENDING).value,
         due_date=payload.due_date,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
@@ -104,7 +102,7 @@ def bulk_create_homework_tasks(payload: HomeworkBulkCreate, db: Session = Depend
             title=item.title,
             detail=item.detail,
             category=item.category,
-            status="pending",
+            status=HomeworkStatus.PENDING.value,
             due_date=item.due_date,
             created_at=now,
             updated_at=now,
@@ -132,13 +130,12 @@ def update_homework_task(task_id: int, payload: HomeworkTaskUpdate, db: Session 
     if payload.due_date is not None:
         task.due_date = payload.due_date
     if payload.status is not None:
-        if payload.status not in {"pending", "done"}:
-            raise HTTPException(status_code=400, detail="Invalid status")
-        if payload.status == "done" and task.status != "done":
+        new_status = payload.status
+        if new_status == HomeworkStatus.DONE and task.status != HomeworkStatus.DONE.value:
             task.completed_at = datetime.utcnow()
-        if payload.status == "pending":
+        if new_status == HomeworkStatus.PENDING:
             task.completed_at = None
-        task.status = payload.status
+        task.status = new_status.value
 
     task.updated_at = datetime.utcnow()
     db.commit()

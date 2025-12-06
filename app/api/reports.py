@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.schemas.reports import CompanyAnalysisReport
 from database import get_db
-from services.reports import build_company_analysis_report
+from app.services.reports import build_company_analysis_report
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 

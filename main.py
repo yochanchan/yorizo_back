@@ -5,7 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from fastapi.middleware.cors import CORSMiddleware
 
-from api import (
+from app.api import (
     admin_bookings,
     case_examples,
     chat,

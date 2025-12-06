@@ -11,9 +11,9 @@ from sqlalchemy.orm import Session
 
 from app.rag.ingest import ingest_document
 from app.schemas.document import DocumentItem, DocumentListResponse, DocumentUploadResponse
-from services.financial_import import upsert_financial_statements
+from app.services.financial_import import upsert_financial_statements
 from database import get_db
-from models import Document, User
+from app.models import Document, User
 
 router = APIRouter()
 logger = logging.getLogger(__name__)

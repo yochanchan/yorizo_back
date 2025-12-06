@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 import openpyxl
 from sqlalchemy.orm import Session
 
-from models import FinancialStatement
+from app.models import FinancialStatement
 
 LabelMap = Dict[str, str]
 

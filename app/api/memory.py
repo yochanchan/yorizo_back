@@ -1,4 +1,4 @@
-﻿import json
+import json
 import re
 from datetime import datetime
 from typing import List, Optional
@@ -8,8 +8,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.schemas.homework import HomeworkTaskRead
+from app.models.enums import HomeworkStatus
 from database import get_db
-from models import CompanyProfile, Conversation, HomeworkTask, Memory, Message, User
+from app.models import CompanyProfile, Conversation, HomeworkTask, Memory, Message, User
 
 CHOICE_ID_PATTERN = re.compile(r"^\[choice_id:[^\]]+\]\s*")
 
@@ -47,15 +48,15 @@ class MemoryResponse(BaseModel):
 
 router = APIRouter()
 STATUS_MAP = {
-    "未着手": "pending",
-    "対応中": "in_progress",
-    "進行中": "in_progress",
-    "完了": "done",
-    "完遂": "done",
-    "pending": "pending",
-    "in_progress": "in_progress",
-    "done": "done",
-    None: "pending",
+    "未着手": HomeworkStatus.PENDING.value,
+    "対応中": HomeworkStatus.PENDING.value,
+    "進行中": HomeworkStatus.PENDING.value,
+    "完了": HomeworkStatus.DONE.value,
+    "完遂": HomeworkStatus.DONE.value,
+    "pending": HomeworkStatus.PENDING.value,
+    "in_progress": HomeworkStatus.PENDING.value,
+    "done": HomeworkStatus.DONE.value,
+    None: HomeworkStatus.PENDING.value,
 }
 
 
@@ -210,8 +211,8 @@ def _build_company_profile_summary(profile: Optional[CompanyProfile]) -> Optiona
 def _generate_homework_summary(tasks: List[HomeworkTask]) -> List[HomeworkTaskRead]:
     def _normalize_status(raw: Optional[str]) -> str:
         if raw is None:
-            return "pending"
-        return STATUS_MAP.get(raw.strip(), "pending")
+            return HomeworkStatus.PENDING.value
+        return STATUS_MAP.get(raw.strip(), HomeworkStatus.PENDING.value)
 
     converted: List[HomeworkTaskRead] = []
     for task in tasks:
@@ -306,7 +307,7 @@ def _prepare_memory_response(
 
     homework_tasks = (
         db.query(HomeworkTask)
-        .filter(HomeworkTask.user_id == user.id, HomeworkTask.status != "done")
+        .filter(HomeworkTask.user_id == user.id, HomeworkTask.status != HomeworkStatus.DONE.value)
         .order_by(HomeworkTask.created_at.desc())
         .limit(10)
         .all()

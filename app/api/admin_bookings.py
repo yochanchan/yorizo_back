@@ -7,12 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 
 from app.schemas.booking_admin import BookingDetail, BookingListItem, BookingListResponse, BookingUpdateRequest
+from app.models import BookingStatus
 from database import get_db
-from models import ConsultationBooking, Conversation
+from app.models import ConsultationBooking, Conversation
 
 router = APIRouter()
 
-VALID_STATUSES = {"pending", "confirmed", "done", "cancelled"}
+VALID_STATUSES = {status.value for status in BookingStatus}
 
 
 def _to_item(booking: ConsultationBooking) -> BookingListItem:
@@ -49,7 +50,7 @@ def list_bookings(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     channel: Optional[str] = Query(None, description="Filter by channel (online/in-person)"),
-    status: Optional[str] = Query(None, description="Filter by status"),
+    status: Optional[BookingStatus] = Query(None, description="Filter by status"),
     expert_id: Optional[str] = Query(None, description="Filter by expert_id"),
     date_from: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
     date_to: Optional[date] = Query(None, description="End date (YYYY-MM-DD, inclusive)"),
@@ -63,7 +64,7 @@ def list_bookings(
     if channel:
         query = query.filter(ConsultationBooking.channel == channel)
     if status:
-        query = query.filter(ConsultationBooking.status == status)
+        query = query.filter(ConsultationBooking.status == status.value)
     if expert_id:
         query = query.filter(ConsultationBooking.expert_id == expert_id)
     if date_from:
@@ -96,9 +97,9 @@ def update_booking(booking_id: str, payload: BookingUpdateRequest, db: Session =
         raise HTTPException(status_code=404, detail="Booking not found")
 
     if payload.status:
-        if payload.status not in VALID_STATUSES:
+        if payload.status.value not in VALID_STATUSES:
             raise HTTPException(status_code=400, detail="Invalid status")
-        booking.status = payload.status
+        booking.status = payload.status.value
     if payload.note is not None:
         booking.note = payload.note
     if payload.conversation_id is not None:

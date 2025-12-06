@@ -1,7 +1,8 @@
 from datetime import date, datetime
-from typing import List, Optional, Literal
+from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict
+from app.models.enums import ConversationStatus, HomeworkStatus
 from app.schemas.homework import HomeworkTaskRead
 
 
@@ -10,7 +11,7 @@ class ConversationSummary(BaseModel):
     title: str
     date: str
     category: Optional[str] = None
-    status: Optional[str] = "in_progress"
+    status: Optional[ConversationStatus] = ConversationStatus.IN_PROGRESS
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -33,7 +34,7 @@ class ConversationDetail(BaseModel):
     title: str
     started_at: datetime | None = None
     category: Optional[str] = None
-    status: Optional[str] = "in_progress"
+    status: Optional[ConversationStatus] = ConversationStatus.IN_PROGRESS
     step: Optional[int] = None
     messages: List[ConversationMessage]
 
@@ -54,14 +55,14 @@ class ConversationCreate(BaseModel):
     user_id: Optional[str] = None
     title: Optional[str] = None
     category: Optional[str] = None
-    status: Optional[str] = "in_progress"
+    status: Optional[ConversationStatus] = ConversationStatus.IN_PROGRESS
     step: Optional[int] = None
 
 
 class ConversationUpdate(BaseModel):
     title: Optional[str] = None
     category: Optional[str] = None
-    status: Optional[str] = None
+    status: Optional[ConversationStatus] = None
     step: Optional[int] = None
 
 
@@ -82,7 +83,7 @@ class ReportHomework(BaseModel):
     title: str
     detail: str | None = None
     timeframe: str | None = None
-    status: Literal["pending", "in_progress", "done"] | None = None
+    status: HomeworkStatus | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

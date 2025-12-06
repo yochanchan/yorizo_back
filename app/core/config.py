@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, env="OPENAI_API_KEY")
     openai_model_chat: str = Field(default="gpt-4.1-mini", env="OPENAI_MODEL_CHAT")
     openai_model_embedding: str = Field(default="text-embedding-3-small", env="OPENAI_MODEL_EMBEDDING")
+    openai_base_url: str | None = Field(default=None, env="OPENAI_BASE_URL")
     azure_openai_endpoint: str | None = Field(default=None, env="AZURE_OPENAI_ENDPOINT")
     azure_openai_api_key: str | None = Field(default=None, env="AZURE_OPENAI_API_KEY")
     azure_openai_chat_deployment: str | None = Field(

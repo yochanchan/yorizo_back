@@ -3,6 +3,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from app.models.enums import BookingStatus
+
 
 class BookingListItem(BaseModel):
     id: str
@@ -12,7 +14,7 @@ class BookingListItem(BaseModel):
     user_name: Optional[str] = None
     conversation_id: Optional[str] = None
     channel: str
-    status: str
+    status: BookingStatus
     date: date
     time_slot: str
     name: str
@@ -36,7 +38,7 @@ class BookingDetail(BaseModel):
     user_name: Optional[str] = None
     conversation_id: Optional[str] = None
     channel: str
-    status: str
+    status: BookingStatus
     date: date
     time_slot: str
     name: str
@@ -49,8 +51,8 @@ class BookingDetail(BaseModel):
 
 
 class BookingUpdateRequest(BaseModel):
-    status: Optional[str] = Field(None, description="pending/confirmed/done/cancelled")
+    status: Optional[BookingStatus] = Field(None, description="pending/confirmed/done/cancelled")
     note: Optional[str] = None
     conversation_id: Optional[str] = None
-    meeting_url: Optional[str] = Field(None, description="Online meeting URL (Zoom/Teamsなど)")
-    line_contact: Optional[str] = Field(None, description="LINE連絡先または招待URL")
+    meeting_url: Optional[str] = Field(None, description="Online meeting URL (Zoom/Teams etc.)")
+    line_contact: Optional[str] = Field(None, description="LINE contact URL/ID")

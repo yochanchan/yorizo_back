@@ -18,8 +18,8 @@ from app.schemas.company_report import (
     RadarPeriod,
     RadarSection,
 )
-from models import Company, CompanyProfile, Conversation, Document, FinancialStatement, HomeworkTask, Message
-from services import rag as rag_service
+from app.models import Company, CompanyProfile, Conversation, Document, FinancialStatement, HomeworkTask, Message
+from app.services import rag as rag_service
 
 logger = logging.getLogger(__name__)
 

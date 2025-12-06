@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
-from models import RAGDocument
+from app.models import RAGDocument
 from app.core.config import settings
 from app.core.openai_client import embed_texts
 

@@ -1,17 +1,21 @@
 from typing import List
+import os
 import sys
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-# Ensure repository root (backend directory) is on sys.path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import models
-import database
+os.environ.setdefault("APP_ENV", "local")
+
+import models  # noqa: E402
+import database  # noqa: E402
+
+from app.core.openai_client import LlmError, LlmResult  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -30,7 +34,6 @@ def _reset_rag_table():
 @pytest.fixture
 def client(monkeypatch) -> TestClient:
     """Test client with OpenAI calls mocked out."""
-    # Align module aliases used inside app code
     sys.modules["models"] = models
     sys.modules["database"] = database
 
@@ -41,35 +44,18 @@ def client(monkeypatch) -> TestClient:
     from app.rag import store
     from main import app
 
-    # Avoid real OpenAI calls
-    monkeypatch.setattr(backend_openai_client.settings, "openai_api_key", "test-key")
-
-    class _DummyClient:
-        def __init__(self):
-            self.embeddings = self
-            self.chat = self
-
-        def create(self, model, input):
-            texts = [input] if isinstance(input, str) else list(input)
-            return type("Resp", (), {"data": [type("Item", (), {"embedding": [float(len(t))]})() for t in texts]})
-
-        def completions(self, **kwargs):
-            return type("Resp", (), {"choices": [type("C", (), {"message": type("M", (), {"content": "mocked"})()})()]})
-
-    monkeypatch.setattr(backend_openai_client, "get_client", lambda: _DummyClient())
-
     async def fake_embed_texts(texts: str | List[str]):
         if isinstance(texts, str):
             texts = [texts]
         return [[float(len(t)), float(len(t) % 10), float(len(t) % 5)] for t in texts]
 
-    async def fake_chat(messages, with_system_prompt: bool = True):
-        return "mocked answer"
+    async def fake_chat_text_safe(prompt_id: str, messages, temperature: float = 0.4):
+        return LlmResult(ok=True, value="mocked answer")
 
     monkeypatch.setattr(store, "embed_texts", fake_embed_texts)
     monkeypatch.setattr(backend_openai_client, "embed_texts", fake_embed_texts)
-    monkeypatch.setattr(backend_openai_client, "generate_chat_reply", fake_chat)
-    monkeypatch.setattr("api.rag.generate_chat_reply", fake_chat, raising=False)
+    monkeypatch.setattr(backend_openai_client, "chat_text_safe", fake_chat_text_safe)
+    monkeypatch.setattr("app.api.rag.chat_text_safe", fake_chat_text_safe, raising=False)
 
     return TestClient(app)
 
@@ -113,3 +99,30 @@ def test_chat_returns_citations(client: TestClient):
     data = resp.json()
     assert data["answer"] == "mocked answer"
     assert doc_id in data["citations"]
+
+
+def test_rag_chat_fallback_on_llm_failure(client: TestClient, monkeypatch):
+    from app.api import rag as rag_api
+
+    resp = client.post(
+        "/api/rag/documents",
+        json={"user_id": "chat-user", "documents": [{"title": "Doc", "text": "Chat document"}]},
+    )
+    assert resp.status_code == 200, resp.text
+
+    async def fail_chat(prompt_id, messages, temperature: float = 0.4):
+        return LlmResult(ok=False, error=LlmError(code="test", message="boom"))
+
+    monkeypatch.setattr("app.api.rag.chat_text_safe", fail_chat, raising=False)
+
+    chat_payload = {
+        "user_id": "chat-user",
+        "messages": [{"role": "user", "content": "Tell me about the document"}],
+        "top_k": 3,
+    }
+    resp = client.post("/api/rag/chat", json=chat_payload)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["answer"] == rag_api.FALLBACK_RAG_MESSAGE
+    assert data["contexts"] == []
+    assert data["citations"] == []

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.schemas.company_profile import CompanyProfilePayload, CompanyProfileResponse
 from database import get_db
-from models import CompanyProfile, User
+from app.models import CompanyProfile, User
 
 router = APIRouter()
 

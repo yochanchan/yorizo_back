@@ -3,6 +3,8 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.models.enums import HomeworkStatus
+
 
 class HomeworkTaskBase(BaseModel):
     title: str = Field(..., max_length=255)
@@ -10,13 +12,13 @@ class HomeworkTaskBase(BaseModel):
     category: Optional[str] = Field(default=None, max_length=50)
     due_date: Optional[date] = None
     timeframe: Optional[str] = Field(default=None, max_length=100)
-    status: Optional[str] = Field(default=None, pattern="^(pending|in_progress|done)$")
+    status: Optional[HomeworkStatus] = None
 
 
 class HomeworkTaskCreate(HomeworkTaskBase):
     user_id: str
     conversation_id: str
-    status: Optional[str] = "pending"
+    status: HomeworkStatus = HomeworkStatus.PENDING
 
 
 class HomeworkTaskUpdate(BaseModel):
@@ -25,7 +27,7 @@ class HomeworkTaskUpdate(BaseModel):
     category: Optional[str] = Field(default=None, max_length=50)
     due_date: Optional[date] = None
     timeframe: Optional[str] = Field(default=None, max_length=100)
-    status: Optional[str] = Field(default=None, pattern="^(pending|in_progress|done)$")
+    status: Optional[HomeworkStatus] = None
 
 
 class HomeworkTaskRead(HomeworkTaskBase):
@@ -35,5 +37,6 @@ class HomeworkTaskRead(HomeworkTaskBase):
     created_at: datetime
     updated_at: datetime
     completed_at: Optional[datetime] = None
+    status: HomeworkStatus | None = HomeworkStatus.PENDING
 
     model_config = ConfigDict(from_attributes=True)
