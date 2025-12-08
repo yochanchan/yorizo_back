@@ -24,6 +24,7 @@ class FinancialStatement(Base):
     current_assets = Column(Numeric(18, 2))
     current_liabilities = Column(Numeric(18, 2))
     fixed_assets = Column(Numeric(18, 2))
+    total_assets = Column(Numeric(18, 2))
     equity = Column(Numeric(18, 2))
     total_liabilities = Column(Numeric(18, 2))
     employees = Column(Integer)
@@ -32,6 +33,7 @@ class FinancialStatement(Base):
     inventory = Column(Numeric(18, 2))
     payables = Column(Numeric(18, 2))
     borrowings = Column(Numeric(18, 2))
+    interest_bearing_debt = Column(Numeric(18, 2))
     previous_sales = Column(Numeric(18, 2))
 
     company = relationship("Company", back_populates="financial_statements")

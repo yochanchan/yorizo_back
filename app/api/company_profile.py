@@ -57,7 +57,7 @@ async def upsert_company_profile(
         )
         db.add(profile)
 
-    for field, value in payload.model_dump().items():
+    for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(profile, field, value)
     profile.updated_at = now
     db.commit()

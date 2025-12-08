@@ -11,6 +11,14 @@ class CompanyProfilePayload(BaseModel):
     annual_sales_range: Optional[str] = None
     location_prefecture: Optional[str] = None
     years_in_business: Optional[int] = None
+    business_type: Optional[str] = None
+    founded_year: Optional[int] = None
+    city: Optional[str] = None
+    main_bank: Optional[str] = None
+    has_loan: Optional[str] = None
+    has_rent: Optional[str] = None
+    owner_age: Optional[str] = None
+    main_concern: Optional[str] = None
 
 
 class CompanyProfileResponse(CompanyProfilePayload):

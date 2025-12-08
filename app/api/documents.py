@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.rag.ingest import ingest_document
 from app.schemas.document import DocumentItem, DocumentListResponse, DocumentUploadResponse
 from app.services.financial_import import upsert_financial_statements
+from app.services.financial_statement_service import upsert_financial_statements_from_pdf
 from database import get_db
 from app.models import Document, User
 
@@ -89,6 +90,7 @@ async def upload_document(
     conversation_id: str | None = Form(None),
     doc_type: str | None = Form(None),
     period_label: str | None = Form(None),
+    fiscal_year: int | None = Form(None),
     db: Session = Depends(get_db),
 ) -> DocumentUploadResponse:
     _ensure_upload_dir()
@@ -131,6 +133,24 @@ async def upload_document(
     db.commit()
     db.refresh(doc)
 
+    # Upsert financial statement immediately for 決算書, independent of RAG ingestion.
+    if (doc_type or "").lower() in {"financial_statement", "financial", "fs", "決算書"} and (company_id or user_id):
+        target_company_id = company_id or user_id or "1"
+        fy = fiscal_year
+        if fy is None and period_label:
+            import re
+
+            match = re.search(r"(19|20)\d{2}", period_label)
+            if match:
+                fy = int(match.group(0))
+        if fy is None:
+            logger.warning("Fiscal year not provided; skipping financial statement upsert for document %s", doc.id)
+        else:
+            try:
+                upsert_financial_statements_from_pdf(db, target_company_id, fy, str(save_path))
+            except Exception:
+                logger.exception("Failed to upsert financial statement row for document %s", doc.id)
+
     try:
         await ingest_document(db, doc)
     except Exception:
@@ -148,8 +168,26 @@ async def upload_document(
         if is_local_benchmark:
             target_company_id = company_id or "1"
             upsert_financial_statements(db, target_company_id, contents)
+
+        is_financial_pdf = suffix == ".pdf" and (
+            (doc_type or "").lower() in {"financial_statement", "financial", "fs", "決算書"}
+            or ("決算" in (file.filename or ""))
+            or ("financial" in (file.filename or "").lower())
+        )
+        if is_financial_pdf and company_id:
+            # Legacy excel ingestion remains; PDF handled above.
+            target_company_id = company_id
+            parsed_periods = None
+            try:
+                from app.services.pdf_financial_parser import parse_financial_pdf
+
+                parsed_periods = parse_financial_pdf(str(save_path))
+            except Exception:
+                parsed_periods = None
+            if parsed_periods:
+                upsert_financial_statements(db, target_company_id, contents)
     except Exception:
-        logger.exception("Failed to import financial statement from uploaded Excel")
+        logger.exception("Failed to import financial statement from uploaded file")
 
     return DocumentUploadResponse(
         document_id=doc.id,
@@ -187,3 +225,13 @@ async def list_documents(user_id: str | None = None, db: Session = Depends(get_d
             for doc in docs
         ]
     )
+
+
+@router.delete("/documents/{document_id}", status_code=204)
+async def delete_document(document_id: str, db: Session = Depends(get_db)) -> None:
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    db.delete(doc)
+    db.commit()
+    return None
