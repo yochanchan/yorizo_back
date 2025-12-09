@@ -302,7 +302,6 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
             raw.setdefault("options", [])
             raw.setdefault("allow_free_text", True)
             # 旧仕様のキーが返ってきた場合は無視する
-            raw.pop("cta_buttons", None)
 
             try:
                 provided_step = int(raw.get("step")) if raw.get("step") is not None else None
