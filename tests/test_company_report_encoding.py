@@ -57,6 +57,6 @@ def test_company_report_preserves_japanese_fields(monkeypatch):
 
         assert report.company.name == "テスト製造株式会社"
         assert report.company.industry == "製造業"
-        assert report.radar.axes == ["売上持続性", "収益性", "生産性", "健全性", "効率性", "安全性"]
+        assert report.radar.axes == ["売上持続性", "収益性", "健全性", "効率性", "安全性"]
     finally:
         db.close()

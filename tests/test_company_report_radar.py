@@ -60,10 +60,10 @@ def test_company_report_radar_uses_financials(monkeypatch):
 
         report = company_report.build_company_report(db, "c1")
 
-        assert report.radar.axes == ["売上持続性", "収益性", "生産性", "健全性", "効率性", "安全性"]
+        assert report.radar.axes == ["売上持続性", "収益性", "健全性", "効率性", "安全性"]
         assert len(report.radar.periods) == 3
         for period in report.radar.periods:
-            assert len(period.raw_values) == 6
+            assert len(period.raw_values) == 5
             for v in period.raw_values:
                 assert v is None or isinstance(v, float)
     finally:
