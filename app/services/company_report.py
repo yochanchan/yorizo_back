@@ -1,11 +1,12 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -15,6 +16,7 @@ from app.schemas.company_report import (
     CompanySummary,
     CompanyReportResponse,
     QualitativeBlock,
+    KPIValue,
     RadarPeriod,
     RadarSection,
 )
@@ -23,12 +25,15 @@ from app.services import rag as rag_service
 
 logger = logging.getLogger(__name__)
 
-AXES = ["売上持続性", "収益性", "生産性", "健全性", "効率性", "安全性"]
+DEMO_USER_ID = os.getenv("DEMO_USER_ID", "demo-user")
+DEMO_COMPANY_ID = os.getenv("DEMO_COMPANY_ID", "1")
+
+AXES = ["売上持続性", "収益性", "健全性", "効率性", "安全性"]
 FALLBACK_TEXT = "LLM未接続のため、簡易コメントを表示しています。"
 REPORT_CHAT_MESSAGE_LIMIT = 50
 REPORT_HOMEWORK_LIMIT = 15
 REPORT_DOCUMENT_SNIPPETS = 6
-REPORT_DOCUMENT_QUERY = "経営レポートの作成に役立つ資料内容を要約してください"
+REPORT_DOCUMENT_QUERY = "経営レポート作成に役立つ情報を要約してください"
 
 
 @dataclass
@@ -51,7 +56,6 @@ class ReportContextPayload:
             "homeworks": self.homeworks,
             "documents": self.documents,
         }
-
 
 
 def _to_float(value: object) -> Optional[float]:
@@ -94,104 +98,141 @@ def _scale_inverse(value: Optional[float], thresholds: List[float]) -> float:
     return float(max(min(score, 5), 0))
 
 
-def _normalize_kpi(key: str, raw: Optional[float]) -> float:
-    # Scores must be 0–5; thresholds follow a simple local benchmark style.
-    if key == "sales_growth":
-        if raw is None:
-            return 0
-        if raw < 0:
-            return 0
-        if raw < 0.02:
-            return 1
-        if raw < 0.05:
-            return 2
-        if raw < 0.10:
-            return 3
-        if raw < 0.20:
-            return 4
-        return 5
-    if key == "operating_margin":
-        if raw is None:
-            return 0
-        if raw < 0:
-            return 0
-        if raw < 0.02:
-            return 1
-        if raw < 0.05:
-            return 2
-        if raw < 0.10:
-            return 3
-        if raw < 0.15:
-            return 4
-        return 5
-    if key == "labor_productivity":
-        if raw is None:
-            return 0
-        if raw < 0:
-            return 0
-        if raw < 500_000:
-            return 1
-        if raw < 1_000_000:
-            return 2
-        if raw < 2_000_000:
-            return 3
-        if raw < 3_000_000:
-            return 4
-        return 5
-    if key == "ebitda_leverage":
-        if raw is None:
-            return 0
-        if raw <= 0:
-            return 5
-        if raw <= 1:
-            return 4
-        if raw <= 3:
-            return 3
-        if raw <= 5:
-            return 2
-        return 1
-    if key == "owc_months":
-        if raw is None:
-            return 0
-        if raw < 0:
-            return 5
-        if raw <= 1:
-            return 5
-        if raw <= 2:
-            return 4
-        if raw <= 3:
-            return 3
-        if raw <= 6:
-            return 2
-        return 1
-    if key == "equity_ratio":
-        if raw is None:
-            return 0
-        if raw < 0.1:
-            return 0
-        if raw < 0.2:
-            return 1
-        if raw < 0.3:
-            return 2
-        if raw < 0.4:
-            return 3
-        if raw < 0.5:
-            return 4
-        return 5
-    return 0.0
+def calc_sales_sustainability(current_sales: Optional[float], prev_sales: Optional[float]) -> Optional[float]:
+    """売上持続性[%] = (当期売上 - 前期売上) / 前期売上 * 100（前期が0/Noneなら計算不可）"""
+    if current_sales is None or prev_sales is None or prev_sales <= 0:
+        return None
+    return (current_sales - prev_sales) / prev_sales * 100.0
 
 
-def _resolve_company(db: Session, company_id: str) -> Tuple[Company, Optional[CompanyProfile]]:
-    candidates = (
-        db.query(Company)
-        .filter((Company.id == company_id) | (Company.user_id == company_id))
-        .all()
-    )
-    profile = (
-        db.query(CompanyProfile)
-        .filter(CompanyProfile.user_id == company_id)
-        .first()
-    )
+def calc_profitability(operating_profit: Optional[float], sales: Optional[float]) -> Optional[float]:
+    """収益性[%] = 営業利益 / 売上高 * 100（売上0/Noneなら計算不可）"""
+    if operating_profit is None or sales is None or sales <= 0:
+        return None
+    return operating_profit / sales * 100.0
+
+
+def calc_soundness_years(
+    interest_bearing_debt: Optional[float],
+    operating_profit: Optional[float],
+    depreciation: Optional[float],
+    net_income: Optional[float],
+) -> Optional[float]:
+    """健全性[年] = 借入金残高 / (当期純利益 + 減価償却費)（借入<=0 または CF<=0 は計算不可）"""
+    debt = interest_bearing_debt
+    if debt is None or debt <= 0:
+        return None
+    cf = (net_income or 0.0) + (depreciation or 0.0)
+    if cf <= 0:
+        return None
+    return _safe_div(debt, cf)
+
+
+def calc_working_capital_months(
+    receivables: Optional[float],
+    inventory: Optional[float],
+    payables: Optional[float],
+    sales: Optional[float],
+) -> Optional[float]:
+    """効率性[か月] = (流動資産相当 - 流動負債相当) / 売上 * 12。マイナスは0か月扱い。"""
+    if sales is None or sales <= 0:
+        return None
+    working_capital = (receivables or 0.0) + (inventory or 0.0) - (payables or 0.0)
+    months = working_capital / sales * 12.0
+    if months < 0:
+        months = 0.0
+    return months
+
+
+def calc_equity_ratio_pct(equity: Optional[float], total_assets: Optional[float]) -> Optional[float]:
+    """安全性[%] = 自己資本 / 総資産 * 100（クリップなし）"""
+    if equity is None or total_assets is None or total_assets <= 0:
+        return None
+    ratio = equity / total_assets * 100.0
+    return ratio
+
+
+def score_sales_growth(pct: Optional[float]) -> Optional[int]:
+    if pct is None:
+        return None
+    if pct >= 10:
+        return 5
+    if pct >= 5:
+        return 4
+    if pct >= 0:
+        return 3
+    if pct >= -10:
+        return 2
+    return 1
+
+
+def score_profit_margin(pct: Optional[float]) -> Optional[int]:
+    if pct is None:
+        return None
+    if pct >= 10:
+        return 5
+    if pct >= 5:
+        return 4
+    if pct >= 0:
+        return 3
+    if pct >= -5:
+        return 2
+    return 1
+
+
+def score_debt_years(years: Optional[float], borrowings: Optional[float], ebitda: Optional[float]) -> Optional[int]:
+    if years is None:
+        return 3  # 中立
+    if years <= 0:
+        return 5
+    if years <= 3:
+        return 4
+    if years <= 5:
+        return 3
+    if years <= 7:
+        return 2
+    return 1
+
+
+def score_working_capital_months(months: Optional[float]) -> Optional[int]:
+    if months is None:
+        return 3  # 中立
+    if months <= 1:
+        return 5
+    if months <= 2:
+        return 4
+    if months <= 3:
+        return 3
+    if months <= 4:
+        return 2
+    return 1
+
+
+def score_equity_ratio(pct: Optional[float]) -> Optional[int]:
+    if pct is None:
+        return 3  # 中立
+    if pct >= 30:
+        return 5
+    if pct >= 20:
+        return 4
+    if pct >= 10:
+        return 3
+    if pct >= 0:
+        return 2
+    return 1
+
+
+def _resolve_company(db: Session, company_id: str, owner_id: Optional[str] = None) -> Tuple[Company, Optional[CompanyProfile]]:
+    profile_user_id = owner_id or (DEMO_USER_ID if company_id == DEMO_COMPANY_ID else None)
+    profile = None
+    if profile_user_id:
+        profile = db.query(CompanyProfile).filter(CompanyProfile.user_id == profile_user_id).first()
+
+    company_filters = [Company.id == company_id, Company.user_id == company_id]
+    if profile_user_id:
+        company_filters.append(Company.user_id == profile_user_id)
+    candidates = db.query(Company).filter(or_(*company_filters)).all()
+
     if not candidates and profile:
         company = Company(
             id=company_id,
@@ -200,6 +241,7 @@ def _resolve_company(db: Session, company_id: str) -> Tuple[Company, Optional[Co
             industry=profile.industry,
             employees_range=profile.employees_range,
             annual_sales_range=profile.annual_sales_range,
+            annual_revenue_range=profile.annual_revenue_range,
             location_prefecture=profile.location_prefecture,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
@@ -210,14 +252,15 @@ def _resolve_company(db: Session, company_id: str) -> Tuple[Company, Optional[Co
         return company, profile
 
     if not candidates:
-        # Create a stub company for the requested id so report can still be generated.
+        fallback_user_id = profile_user_id or company_id
         company = Company(
             id=company_id,
-            user_id=company_id,
+            user_id=fallback_user_id,
             company_name=None,
             industry=None,
             employees_range=None,
             annual_sales_range=None,
+            annual_revenue_range=None,
             location_prefecture=None,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
@@ -236,11 +279,10 @@ def _resolve_company(db: Session, company_id: str) -> Tuple[Company, Optional[Co
 
     chosen = sorted(candidates, key=stmt_stats, reverse=True)[0]
     if not profile and chosen.user_id:
-        profile = (
-            db.query(CompanyProfile)
-            .filter(CompanyProfile.user_id == chosen.user_id)
-            .first()
-        )
+        profile = db.query(CompanyProfile).filter(CompanyProfile.user_id == chosen.user_id).first()
+    if profile and chosen.user_id is None:
+        chosen.user_id = profile.user_id
+        db.commit()
     return chosen, profile
 
 
@@ -254,77 +296,99 @@ def _load_financials(db: Session, company_id: str) -> List[FinancialStatement]:
     )
 
 
-def _compute_kpis(stmt: FinancialStatement, prev_sales: Optional[float]) -> Dict[str, Optional[float]]:
+def _compute_kpis(stmt: FinancialStatement, prev_sales: Optional[float]) -> List[Dict[str, Any]]:
     sales = _to_float(stmt.sales)
-    operating_profit = _to_float(stmt.operating_profit)
-    depreciation = _to_float(stmt.depreciation)
-    employees = _to_float(stmt.employees)
-    cash = _to_float(getattr(stmt, "cash_and_deposits", None))
-    borrowings = _to_float(getattr(stmt, "borrowings", None))
+    previous_sales = prev_sales if prev_sales is not None else _to_float(getattr(stmt, "previous_sales", None))
+    operating_profit = _to_float(getattr(stmt, "operating_profit", None))
+    depreciation = _to_float(getattr(stmt, "depreciation", None))
+    net_income = _to_float(getattr(stmt, "net_income", None))
+    borrowings = _to_float(getattr(stmt, "interest_bearing_debt", None))
+    if borrowings is None:
+        borrowings = _to_float(getattr(stmt, "borrowings", None))
     receivables = _to_float(getattr(stmt, "receivables", None))
     inventory = _to_float(getattr(stmt, "inventory", None))
     payables = _to_float(getattr(stmt, "payables", None))
-    equity = _to_float(stmt.equity)
-    total_liabilities = _to_float(stmt.total_liabilities)
+    total_assets = _to_float(getattr(stmt, "total_assets", None))
+    equity = _to_float(getattr(stmt, "equity", None))
 
-    ebitda = None
-    if operating_profit is not None or depreciation is not None:
-        ebitda = (operating_profit or 0.0) + (depreciation or 0.0)
+    raw_sales_growth = calc_sales_sustainability(sales, previous_sales)
+    raw_profitability = calc_profitability(operating_profit, sales)
+    raw_soundness = calc_soundness_years(borrowings, operating_profit, depreciation, net_income)
+    raw_efficiency = calc_working_capital_months(receivables, inventory, payables, sales)
+    raw_safety = calc_equity_ratio_pct(equity, total_assets)
 
-    growth = None
-    base_prev_sales = prev_sales or _to_float(getattr(stmt, "previous_sales", None))
-    if base_prev_sales:
-        growth = _safe_div((sales or 0.0) - base_prev_sales, base_prev_sales)
+    def _display(val: Optional[float], unit: str) -> str:
+        if val is None:
+            return "データなし"
+        rounded = round(val * 10) / 10
+        return f"{rounded:.1f}{unit}"
 
-    owc = None
-    if receivables is not None or inventory is not None or payables is not None:
-        owc = (receivables or 0.0) + (inventory or 0.0) - (payables or 0.0)
-    owc_months = _safe_div(owc, sales) * 12 if owc is not None and sales else None
-
-    equity_ratio = _safe_div(equity, (equity or 0.0) + (total_liabilities or 0.0))
-    ebitda_leverage = _safe_div((borrowings or 0.0) - (cash or 0.0), ebitda) if ebitda else None
-
-    return {
-        "sales_growth": growth,
-        "operating_margin": _safe_div(operating_profit, sales),
-        "labor_productivity": _safe_div(operating_profit, employees),
-        "ebitda_leverage": ebitda_leverage,
-        "owc_months": owc_months,
-        "equity_ratio": equity_ratio,
-    }
+    kpis: List[Dict[str, Any]] = [
+        {
+            "key": "sales_sustainability",
+            "label": AXES[0],
+            "raw": raw_sales_growth,
+            "value_display": _display(raw_sales_growth, "%"),
+            "unit": "%",
+            "score": score_sales_growth(raw_sales_growth),
+        },
+        {
+            "key": "profitability",
+            "label": AXES[1],
+            "raw": raw_profitability,
+            "value_display": _display(raw_profitability, "%"),
+            "unit": "%",
+            "score": score_profit_margin(raw_profitability),
+        },
+        {
+            "key": "soundness",
+            "label": AXES[2],
+            "raw": raw_soundness,
+            "value_display": _display(raw_soundness, "年"),
+            "unit": "年",
+            "score": score_debt_years(raw_soundness, borrowings, (net_income or 0) + (depreciation or 0)),
+        },
+        {
+            "key": "efficiency",
+            "label": AXES[3],
+            "raw": raw_efficiency,
+            "value_display": _display(raw_efficiency, "か月"),
+            "unit": "か月",
+            "score": score_working_capital_months(raw_efficiency),
+        },
+        {
+            "key": "safety",
+            "label": AXES[4],
+            "raw": raw_safety,
+            "value_display": _display(raw_safety, "%"),
+            "unit": "%",
+            "score": score_equity_ratio(raw_safety),
+        },
+    ]
+    return kpis
 
 
 def _build_radar(financials: List[FinancialStatement]) -> RadarSection:
     axes = AXES
     periods: List[RadarPeriod] = []
-    prev_sales: Optional[float] = None
     for idx, stmt in enumerate(financials):
+        prev_sales = _to_float(financials[idx + 1].sales) if idx + 1 < len(financials) else None
         kpis = _compute_kpis(stmt, prev_sales)
-        raw_values = [
-            kpis.get("sales_growth"),
-            kpis.get("operating_margin"),
-            kpis.get("labor_productivity"),
-            kpis.get("ebitda_leverage"),
-            kpis.get("owc_months"),
-            kpis.get("equity_ratio"),
-        ]
-        scores = [
-            _normalize_kpi("sales_growth", raw_values[0]),
-            _normalize_kpi("operating_margin", raw_values[1]),
-            _normalize_kpi("labor_productivity", raw_values[2]),
-            _normalize_kpi("ebitda_leverage", raw_values[3]),
-            _normalize_kpi("owc_months", raw_values[4]),
-            _normalize_kpi("equity_ratio", raw_values[5]),
-        ]
-        label = "最新決算期" if idx == 0 else ("前期決算期" if idx == 1 else "前々期決算期")
+        raw_values = [k.get("raw") for k in kpis]
+        scores = [k.get("score") for k in kpis]
+        fiscal_year = getattr(stmt, "fiscal_year", None)
+        if fiscal_year:
+            label = f"{fiscal_year}期"
+        else:
+            label = "最新期" if idx == 0 else ("前期" if idx == 1 else "前々期")
         periods.append(
             RadarPeriod(
                 label=label,
-                scores=[float(s) for s in scores],
+                scores=[float(s) if s is not None else 0.0 for s in scores],
                 raw_values=[(float(v) if v is not None else None) for v in raw_values],
+                kpis=[KPIValue(**k) for k in kpis],
             )
         )
-        prev_sales = _to_float(stmt.sales)
     return RadarSection(axes=axes, periods=periods)
 
 
@@ -357,10 +421,27 @@ def _build_financial_context(radar: RadarSection) -> Dict[str, Any]:
     }
     for period in radar.periods:
         kpis: Dict[str, Dict[str, Optional[float]]] = {}
+        if getattr(period, "kpis", None):
+            for item in period.kpis:
+                kpis[item.label] = {
+                    "raw_value": item.raw,
+                    "score": item.score,
+                    "unit": item.unit,
+                    "display": item.value_display,
+                }
+        else:
+            for axis, raw, score in zip(radar.axes, period.raw_values, period.scores):
+                kpis[axis] = {
+                    "raw_value": float(raw) if raw is not None else None,
+                    "score": float(score) if score is not None else None,
+                    "unit": None,
+                }
         for axis, raw, score in zip(radar.axes, period.raw_values, period.scores):
             kpis[axis] = {
-                "raw_value": float(raw) if raw is not None else None,
-                "score": float(score) if score is not None else None,
+                "raw_value": kpis.get(axis, {}).get("raw_value", float(raw) if raw is not None else None),
+                "score": kpis.get(axis, {}).get("score", float(score) if score is not None else None),
+                "unit": kpis.get(axis, {}).get("unit"),
+                "display": kpis.get(axis, {}).get("display"),
             }
         context["periods"].append({"label": period.label, "kpis": kpis})
     return context
@@ -368,18 +449,27 @@ def _build_financial_context(radar: RadarSection) -> Dict[str, Any]:
 
 def _build_company_profile_context(company: Company, profile: Optional[CompanyProfile]) -> Dict[str, Any]:
     profile_dict: Dict[str, Any] = {
-        "company_name": getattr(company, "name", None)
-        or company.company_name
-        or (profile.company_name if profile else None),
-        "industry": company.industry or (profile.industry if profile else None),
-        "employees": company.employees or (profile.employees if profile else None),
-        "employees_range": company.employees_range or (profile.employees_range if profile else None),
-        "annual_sales_range": company.annual_sales_range or (profile.annual_sales_range if profile else None),
-        "annual_revenue_range": company.annual_revenue_range or (profile.annual_revenue_range if profile else None),
-        "location_prefecture": company.location_prefecture or (profile.location_prefecture if profile else None),
+        "company_name": (profile.company_name if profile else None)
+        or (profile.name if profile else None)
+        or getattr(company, "name", None)
+        or company.company_name,
+        "industry": (profile.industry if profile else None) or company.industry,
+        "employees": (profile.employees if profile else None) or company.employees,
+        "employees_range": (profile.employees_range if profile else None) or company.employees_range,
+        "annual_sales_range": (profile.annual_sales_range if profile else None) or company.annual_sales_range,
+        "annual_revenue_range": (profile.annual_revenue_range if profile else None) or company.annual_revenue_range,
+        "location_prefecture": (profile.location_prefecture if profile else None) or company.location_prefecture,
         "years_in_business": profile.years_in_business if profile else None,
+        "business_type": profile.business_type if profile else None,
+        "founded_year": profile.founded_year if profile else None,
+        "city": profile.city if profile else None,
+        "main_bank": profile.main_bank if profile else None,
+        "has_loan": profile.has_loan if profile else None,
+        "has_rent": profile.has_rent if profile else None,
+        "owner_age": profile.owner_age if profile else None,
+        "main_concern": profile.main_concern if profile else None,
     }
-    return {k: v for k, v in profile_dict.items() if v not in (None, '', [])}
+    return {k: v for k, v in profile_dict.items() if v not in (None, "", [])}
 
 
 def _messages_to_context(messages: List[Message]) -> List[Dict[str, Any]]:
@@ -387,7 +477,7 @@ def _messages_to_context(messages: List[Message]) -> List[Dict[str, Any]]:
     for msg in messages:
         if msg.role not in {"user", "assistant"}:
             continue
-        content = (msg.content or '').strip()
+        content = (msg.content or "").strip()
         if not content:
             continue
         payload.append(
@@ -418,9 +508,9 @@ def _homeworks_to_context(homeworks: List[HomeworkTask]) -> List[Dict[str, Any]]
 
 
 def _normalize_snippet_text(text: str, max_length: int = 280) -> str:
-    cleaned = ' '.join(text.split())
+    cleaned = " ".join(text.split())
     if len(cleaned) > max_length:
-        cleaned = cleaned[: max_length - 3].rstrip() + '...'
+        cleaned = cleaned[: max_length - 3].rstrip() + "..."
     return cleaned
 
 
@@ -469,7 +559,7 @@ def _get_report_documents_summary(db: Session, company: Company, owner_id: Optio
             .all()
         )
         for doc in documents:
-            base_title = doc.filename or '資料'
+            base_title = doc.filename or "ドキュメント"
             meta_parts: List[str] = []
             if doc.doc_type:
                 meta_parts.append(doc.doc_type)
@@ -478,7 +568,7 @@ def _get_report_documents_summary(db: Session, company: Company, owner_id: Optio
             prefix = base_title
             if meta_parts:
                 prefix = f"{base_title} ({' / '.join(meta_parts)})"
-            preview = (doc.content_text or '').strip()
+            preview = (doc.content_text or "").strip()
             entry = prefix
             if preview:
                 entry = f"{prefix}: {_normalize_snippet_text(preview)}"
@@ -510,39 +600,19 @@ def _build_report_context(
     )
 
 
-LLM_SYSTEM_PROMPT = """あなたは中小企業診断士です。
+LLM_SYSTEM_PROMPT = """あなたは中小企業診断士です。以下の情報を踏まえて、日本語で簡潔にレポートをまとめてください。
 
-入力として、
-・ローカルベンチマークの財務指標（6指標×最大3期）
-・会社の基本情報（業種、規模、地域など）
-・経営者とのチャット履歴（相談内容）
-・これまでに設定した宿題（対応策のメモ）
-・経営者がアップロードした資料（PDFなど）の要約
-が与えられます。
+入力として以下が与えられます:
+- ローカルベンチマークの財務指標（最大3期）
+- 会社の基本情報（業種、規模、地域など）
+- 経営者とのチャット履歴
+- これまでの宿題（対応策メモ）
+- 経営者がアップロードした資料の要約
 
-これらをすべて踏まえて、
-① ローカルベンチマークの「企業の特徴」シートに相当する4領域
-   - 経営者
-   - 事業
-   - 企業を取り巻く環境・関係者
-   - 内部管理体制
-② 「現状認識」
-③ 「将来目標」
-④ 「対応策」（宿題の内容も踏まえる）
-⑤ 現状スナップショットとしての強み・弱み
-⑥ 将来像（desired_image）と現状とのギャップ、経営者が自問するための問い
-を、日本語でわかりやすく整理してください。
-
-特に、
-- チャット履歴に出てくる「悩み・モヤモヤ・やりたいこと」
-- PDFなどの資料に含まれる重要な数字やキーワード
-を積極的に反映し、抽象的な一般論ではなく、「この会社の状況」に即したコメントにしてください。
-Thinking_questions は経営者自身が次の一手を考えるための問いを2〜3個、簡潔に提示してください。
-"""
+これらを踏まえて、簡潔で分かりやすいレポートを出力してください。"""
 
 
-LLM_OUTPUT_GUIDANCE = """出力は必ず JSON 形式で返してください。
-期待するスキーマ:
+LLM_OUTPUT_GUIDANCE = """出力は以下のJSONスキーマに従ってください。
 {
   "qualitative": {
     "keieisha": {
@@ -550,15 +620,9 @@ LLM_OUTPUT_GUIDANCE = """出力は必ず JSON 形式で返してください。
       "risks": "...",
       "strengths": "..."
     },
-    "jigyo": {
-      "summary": "..."
-    },
-    "kankyo": {
-      "summary": "..."
-    },
-    "naibu": {
-      "summary": "..."
-    }
+    "jigyo": { "summary": "..." },
+    "kankyo": { "summary": "..." },
+    "naibu": { "summary": "..." }
   },
   "current_state": "...",
   "future_goal": "...",
@@ -569,34 +633,7 @@ LLM_OUTPUT_GUIDANCE = """出力は必ず JSON 形式で返してください。
   "gap_summary": "...",
   "thinking_questions": ["...", "..."]
 }
-各コメントは200〜300文字程度とし、箇条書きではなく短い文章で書いてください。thinking_questions は短い問いを配列で返してください。
 """
-
-
-def _fallback_report_fields() -> Tuple[
-    QualitativeBlock,
-    str,
-    str,
-    str,
-    str,
-    str,
-    List[str],
-    List[str],
-    List[str],
-]:
-    return (
-        _empty_qualitative(),
-        FALLBACK_TEXT,
-        FALLBACK_TEXT,
-        FALLBACK_TEXT,
-        FALLBACK_TEXT,
-        FALLBACK_TEXT,
-        [],
-        [],
-        [],
-    )
-
-
 def _generate_report_with_llm(report_context: ReportContextPayload) -> Tuple[
     QualitativeBlock,
     str,
@@ -610,7 +647,7 @@ def _generate_report_with_llm(report_context: ReportContextPayload) -> Tuple[
 ]:
     user_content = (
         f"{LLM_OUTPUT_GUIDANCE}\n\n"
-        f"レポート入力:\n{json.dumps(report_context.to_dict(), ensure_ascii=False)}"
+        f"繝ｬ繝昴・繝医・譚先侭:\n{json.dumps(report_context.to_dict(), ensure_ascii=False)}"
     )
     try:
         raw = chat_completion_json(
@@ -631,20 +668,21 @@ def _generate_report_with_llm(report_context: ReportContextPayload) -> Tuple[
 
 QUAL_ROWS = {
     "keieisha": [
-        ("summary", "経営者の状況"),
-        ("risks", "リスク・課題"),
-        ("strengths", "強み・活用資源"),
+        ("summary", "経営者の特徴"),
+        ("risks", "リスク"),
+        ("strengths", "強み"),
     ],
     "jigyo": [
-        ("summary", "事業の特徴・注力ポイント"),
+        ("summary", "事業・商品/サービス"),
     ],
     "kankyo": [
-        ("summary", "企業を取り巻く環境・関係者"),
+        ("summary", "外部環境"),
     ],
     "naibu": [
-        ("summary", "内部管理体制・組織運営"),
+        ("summary", "内部・組織"),
     ],
 }
+
 
 def _empty_qualitative() -> QualitativeBlock:
     def block(section: str) -> Dict[str, str]:
@@ -655,6 +693,44 @@ def _empty_qualitative() -> QualitativeBlock:
         jigyo=block("jigyo"),
         kankyo=block("kankyo"),
         naibu=block("naibu"),
+    )
+
+
+def _fallback_report_fields() -> Tuple[
+    QualitativeBlock,
+    str,
+    str,
+    str,
+    str,
+    str,
+    List[str],
+    List[str],
+    List[str],
+]:
+    """
+    Return default Japanese texts when the LLM is not available.
+
+    The tuple shape must match `_generate_report_with_llm` unpacking in `build_company_report`.
+    """
+    fallback_summary = (
+        "LLM未接続のため、自動要約はまだ利用できませんが、チャット内容や決算書をもとに相談員と一緒に現状を整理してください。"
+    )
+    fallback_strengths = "強みの自動整理は未実装です。これまでうまくいっている点や顧客に評価されている点をメモしておきましょう。"
+    fallback_risks = "リスクの自動整理は未実装です。売上の波や資金繰りで不安な点があれば相談メモに記録してください。"
+    fallback_next_steps = "次の一歩の自動提案は未実装です。気になるテーマを1〜3個決めて、よろず支援拠点で相談してみましょう。"
+    fallback_radar_comment = "レーダーチャートは決算書の数値をもとに概況を示しています。詳細なコメントは相談員と一緒に確認してください。"
+    fallback_kpi_comment = "各指標の見方や目安は、画面の説明と相談員からのアドバイスを参考にしてください。"
+
+    return (
+        _empty_qualitative(),
+        fallback_summary,  # current_state
+        fallback_summary,  # future_goal
+        fallback_next_steps,  # action_plan
+        fallback_radar_comment,  # desired_image
+        fallback_kpi_comment,  # gap_summary
+        [],  # thinking_questions
+        [fallback_strengths],  # snapshot_strengths
+        [fallback_risks],  # snapshot_weaknesses
     )
 
 
@@ -736,12 +812,14 @@ def _parse_llm_output(raw: str) -> Tuple[
         logger.exception("Failed to parse LLM output for qualitative block")
         return _fallback_report_fields()
 
+
 def build_company_report(db: Session, company_id: str) -> CompanyReportResponse:
-    company, profile = _resolve_company(db, company_id)
+    owner_hint = DEMO_USER_ID if company_id == DEMO_COMPANY_ID else None
+    company, profile = _resolve_company(db, company_id, owner_hint)
     financials = _load_financials(db, company.id)
     radar = _build_radar(financials) if financials else RadarSection(axes=AXES, periods=[])
 
-    owner_id = company.user_id or str(company.id)
+    owner_id = profile.user_id if profile else (company.user_id or owner_hint or str(company.id))
     messages = _load_conversations(db, owner_id)
     homeworks = _load_homeworks(db, owner_id)
     document_snippets = _get_report_documents_summary(db, company, owner_id)
@@ -769,10 +847,16 @@ def build_company_report(db: Session, company_id: str) -> CompanyReportResponse:
 
     company_summary = CompanySummary(
         id=company.id,
-        name=getattr(company, "name", None) or company.company_name,
-        industry=company.industry,
-        employees=company.employees,
-        annual_revenue_range=company.annual_revenue_range,
+        company_name=(profile.company_name if profile else None)
+        or (profile.name if profile else None)
+        or getattr(company, "name", None)
+        or company.company_name,
+        name=(profile.name if profile else None) or getattr(company, "name", None) or company.company_name,
+        industry=(profile.industry if profile else None) or company.industry,
+        employees=(profile.employees if profile else None) or company.employees,
+        employees_range=(profile.employees_range if profile else None) or company.employees_range,
+        annual_sales_range=(profile.annual_sales_range if profile else None) or company.annual_sales_range,
+        annual_revenue_range=(profile.annual_revenue_range if profile else None) or company.annual_revenue_range,
     )
 
     return CompanyReportResponse(
@@ -788,3 +872,6 @@ def build_company_report(db: Session, company_id: str) -> CompanyReportResponse:
         gap_summary=gap_summary,
         thinking_questions=thinking_questions,
     )
+
+
+

@@ -1,11 +1,21 @@
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Optional
+
+
+class KPIValue(BaseModel):
+    key: str
+    label: str
+    raw: Optional[float]
+    value_display: str
+    unit: Optional[str] = None
+    score: Optional[int]
 
 
 class RadarPeriod(BaseModel):
     label: str
-    scores: List[float]
-    raw_values: List[float | None]
+    scores: List[Optional[float]]
+    raw_values: List[Optional[float]]
+    kpis: List[KPIValue] = []
 
 
 class RadarSection(BaseModel):
@@ -22,9 +32,12 @@ class QualitativeBlock(BaseModel):
 
 class CompanySummary(BaseModel):
     id: str | int
+    company_name: str | None = None
     name: str | None = None
     industry: str | None = None
     employees: int | None = None
+    employees_range: str | None = None
+    annual_sales_range: str | None = None
     annual_revenue_range: str | None = None
 
 

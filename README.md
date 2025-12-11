@@ -67,6 +67,7 @@ alembic upgrade head
 - `AZURE_OPENAI_ENDPOINT`: e.g. `https://aoai-10th.openai.azure.com/`
 - `AZURE_OPENAI_API_KEY`: Azure OpenAI key
 - `AZURE_OPENAI_CHAT_DEPLOYMENT`: deployment name used for chat (e.g., `gpt-4o-mini-yorizo`)
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`: deployment name used for embeddings (required for RAG)
   - (フォールバックで `AZURE_OPENAI_DEPLOYMENT` も読み取りますが、今後は上記を設定してください)
 - `AZURE_OPENAI_API_VERSION`: default `2024-02-15-preview`
 - `CORS_ORIGINS`: CSV of allowed origins (default `http://localhost:3000`)

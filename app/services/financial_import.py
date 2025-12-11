@@ -8,6 +8,7 @@ import openpyxl
 from sqlalchemy.orm import Session
 
 from app.models import FinancialStatement
+from app.services.financial_statement_service import upsert_financial_rows
 
 LabelMap = Dict[str, str]
 
@@ -164,29 +165,4 @@ def upsert_financial_statements(db: Session, company_id: str, content: bytes) ->
     if not rows:
         return
 
-    rows = sorted(rows, key=lambda r: r.get("fiscal_year") or 0)
-    # set previous_sales for latest rows based on earlier data
-    for idx, entry in enumerate(rows):
-        if idx > 0:
-            entry.setdefault("previous_sales", rows[idx - 1].get("sales"))
-
-    for entry in rows:
-        fiscal_year = entry.get("fiscal_year")
-        if not fiscal_year:
-            continue
-        stmt = (
-            db.query(FinancialStatement)
-            .filter(
-                FinancialStatement.company_id == company_id,
-                FinancialStatement.fiscal_year == fiscal_year,
-            )
-            .first()
-        )
-        if not stmt:
-            stmt = FinancialStatement(company_id=company_id, fiscal_year=fiscal_year)
-            db.add(stmt)
-        for field, value in entry.items():
-            if field == "fiscal_year":
-                continue
-            setattr(stmt, field, value)
-    db.commit()
+    upsert_financial_rows(db, company_id, rows)

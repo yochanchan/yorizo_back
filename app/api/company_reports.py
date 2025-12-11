@@ -6,19 +6,27 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.schemas.company_report import CompanyReportResponse, QualitativeBlock, RadarSection
+from app.services.company_report import AXES, build_company_report
 from database import get_db
-from app.services.company_report import build_company_report
 
 router = APIRouter(prefix="/companies", tags=["companies"])
 logger = logging.getLogger(__name__)
-AXES = ["売上持続性", "収益性", "生産性", "健全性", "効率性", "安全性"]
 
 
 def _empty_report() -> CompanyReportResponse:
-    placeholder = "データ未登録のため、簡易コメントを表示しています。"
+    placeholder = "レポートを生成できませんでした。最低限の情報のみを返します。"
     radar = RadarSection(axes=AXES, periods=[])
     qual = QualitativeBlock(keieisha={}, jigyo={}, kankyo={}, naibu={})
-    company_stub = {"id": "unknown", "name": None, "industry": None, "employees": None, "annual_revenue_range": None}
+    company_stub = {
+        "id": "unknown",
+        "company_name": None,
+        "name": None,
+        "industry": None,
+        "employees": None,
+        "employees_range": None,
+        "annual_sales_range": None,
+        "annual_revenue_range": None,
+    }
     return CompanyReportResponse(
         company=company_stub,  # type: ignore[arg-type]
         radar=radar,
