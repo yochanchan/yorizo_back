@@ -27,7 +27,7 @@ class HomeworkTask(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(GUID_TYPE, ForeignKey("users.id"), nullable=False, index=True)
-    conversation_id = Column(GUID_TYPE, ForeignKey("conversations.id"), nullable=True, index=True)
+    conversation_id = Column(GUID_TYPE, ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True)
     title = Column(String(255), nullable=False)
     detail = Column(Text, nullable=True)
     category = Column(String(50), nullable=True)

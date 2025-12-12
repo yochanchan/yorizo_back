@@ -17,7 +17,7 @@ class HomeworkTaskBase(BaseModel):
 
 class HomeworkTaskCreate(HomeworkTaskBase):
     user_id: str
-    conversation_id: str
+    conversation_id: Optional[str] = None
     status: HomeworkStatus = HomeworkStatus.PENDING
 
 
