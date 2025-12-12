@@ -68,7 +68,7 @@ def _mock_chat_json(monkeypatch, *, fail_at: Optional[List[int]] = None):
 
     counter = {"n": 0}
 
-    async def _stub(prompt_id, messages, max_tokens=None):
+    async def _stub(prompt_id, messages, max_tokens=None, **kwargs):
         counter["n"] += 1
         if fail_at and counter["n"] in fail_at:
             return oc.LlmResult(ok=False, error=oc.LlmError(code="bad_json", message="broken"))

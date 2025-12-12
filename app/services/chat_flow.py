@@ -297,10 +297,12 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
     except (TypeError, ValueError):
         prior_step_int = 0
 
+    used_fallback = False
     try:
         llm_result = await chat_json_safe("LLM-CHAT-01-v1", messages, max_tokens=400, temperature=0.25)
         if not llm_result.ok or not isinstance(llm_result.value, dict):
             logger.warning("guided chat: LLM failed (%s)", llm_result.error)
+            used_fallback = True
             result = _build_fallback_response(conversation)
         else:
             raw = dict(llm_result.value)
@@ -322,15 +324,18 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
             result = ChatTurnResponse(conversation_id=conversation.id, **raw)
     except AzureNotConfiguredError:
         logger.exception("Azure OpenAI is not configured; using fallback response")
+        used_fallback = True
         result = _build_fallback_response(conversation)
     except HTTPException:
         logger.exception("HTTPException from LLM client; using fallback response")
+        used_fallback = True
         result = _build_fallback_response(conversation)
     except Exception:
         logger.exception("guided chat generation failed; using fallback response")
+        used_fallback = True
         result = _build_fallback_response(conversation)
 
-    conversation.step = prior_step_int if result.reply == FALLBACK_REPLY else result.step
+    conversation.step = prior_step_int if used_fallback else result.step
     conversation.status = (
         ConversationStatus.COMPLETED.value if result.done else ConversationStatus.IN_PROGRESS.value
     )
@@ -339,7 +344,7 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
     db.add(conversation)
     db.commit()
 
-    if result.reply != FALLBACK_REPLY:
+    if not used_fallback:
         assistant_payload = result.model_dump()
         assistant_payload["conversation_id"] = conversation.id
         _persist_message(db, conversation, "assistant", json.dumps(assistant_payload, ensure_ascii=False))
