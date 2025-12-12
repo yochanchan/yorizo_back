@@ -73,6 +73,7 @@ class RagQueryRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=20)
     user_id: Optional[str] = None
     company_id: Optional[str] = None
+    source_types: Optional[List[str]] = None
 
     model_config = ConfigDict(populate_by_name=True)
 

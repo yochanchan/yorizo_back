@@ -95,6 +95,7 @@ async def rag_search(payload: RagQueryRequest) -> RagQueryResponse:
             k=payload.top_k,
             user_id=owner_id,
             company_id=payload.company_id,
+            source_types=payload.source_types,
         )
         matches = [
             RagSimilarDocument(

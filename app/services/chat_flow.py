@@ -8,7 +8,7 @@ from typing import List, Optional
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.openai_client import chat_json_safe
+from app.core.openai_client import AzureNotConfiguredError, chat_json_safe
 from app.models import CompanyProfile, Conversation, Document, Memory, Message, User
 from app.models.enums import ConversationStatus
 from app.schemas.chat import ChatTurnRequest, ChatTurnResponse
@@ -17,47 +17,16 @@ from app.services import rag as rag_service
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """
-あなたは共感的な経営相談AI「Yorizo」です。
-中小企業の経営者の悩みを整理し、「今できる一歩」に絞って対話します。やわらかい丁寧語で話し、否定・説教・タメ口・上から目線は避け、「現実的だけれど前向き」なトーンを保ってください。
-
-【出力形式（最重要）】
-・必ず JSON オブジェクトを 1 つだけ返します。
-・前後に説明文やマークダウン、コードブロック（```）などは一切書きません。
-・トップレベルのキーは次の 5 つだけにします:
-  "reply", "question", "options", "allow_free_text", "done"
-・すべてのキーと文字列はダブルクォートで囲み、末尾カンマは禁止、true/false は小文字の JSON boolean にします。
-
-【各フィールドの仕様】
-
-1. "reply": string
-・日本語 200 文字以内・最大 2 段落（各 2〜3 文）。
-・「共感 → 状況の簡単な整理 → 今できる具体的な一歩」を短く伝えます。
-・ユーザーが答えやすいよう、複数の選択肢を提案する形で、あとで出す "question" の内容と自然につながるように書きます。
-
-2. "question": string
-・日本語 30 文字以内の質問文 1 文。
-・"reply" で示した一歩に関する、ごく答えやすい確認または提案ベースの質問にします。
-・説明文や箇条書きは入れません。
-
-3. "options": array
-・3~4 件の配列。
-・各要素は次の 3 キーを持つオブジェクトです（すべて string）:
-  - "id": 英小文字とアンダースコアのみの識別子（例: "check_cash_flow"）。
-  - "label": 日本語 15 文字以内。"question" への回答や次の一歩を少し具体化した文にします。
-  - "value": 日本語 15 文字以内。"question" への回答や次の一歩を少し具体化した文にします。"label" と同一出力。
-・"question" に対応する、ユーザーがすぐに選べる選択肢だけを並べます。
-
-4. "allow_free_text": boolean
-・自由入力を許可するか。基本は true を返します。
-
-5. "done": boolean
-・会話をここで締めたいとき true。基本は false。
-
-【スタイル】
-・相手の感情に寄り添いながら、「いま分かっている事実」と「今日からできる小さな一歩」を優先して伝えます。
-・分からない数字や事実は新しく作らず、「まだ分かりません」などと率直に伝えます。
-
-この仕様どおりの JSON オブジェクトだけを出力してください。
+あなたは共感力の高い経営相談AI「Yorizo」です。JSON オブジェクトのみを返してください。
+必須キー: reply, question, options, cta_buttons, allow_free_text, step, done
+ルール:
+- reply: 1〜2文で共感＋要点＋小さな次アクション（敬体、200字以内）。
+- question: 次に深掘りしたい質問を1行だけ。説明文は禁止。
+- options: 0〜4件 {id,label,value}。label/valueは日本語15字以内で重複なし。
+- cta_buttons: 必要なら {id,label,action}。不要なら空配列。
+- allow_free_text: true/false を明記。
+- step: 整数。done=true のときだけ会話を締める。
+- conversation_id は返さない。余計なフィールドを追加しない。前後に文字列を付けない。
 """.strip()
 
 FALLBACK_REPLY = "Yorizo が考えるのに失敗しました。管理者にお問い合わせください。"
@@ -130,7 +99,7 @@ def _find_option_label(messages: List[Message], option_id: str) -> Optional[str]
 def _history_as_text(messages: List[Message]) -> str:
     """直近の会話を読みやすいテキストに整形する。"""
     lines: List[str] = []
-    for msg in messages[-10:]:
+    for msg in messages[-5:]:
         if msg.role == "assistant":
             try:
                 data = json.loads(msg.content)
@@ -187,7 +156,7 @@ def _collect_structured_context(db: Session, user: Optional[User], conversation:
         db.query(Document)
         .filter(Document.user_id == user.id)
         .order_by(Document.uploaded_at.desc())
-        .limit(5)
+        .limit(3)
         .all()
     )
     if docs:
@@ -220,6 +189,7 @@ def _build_fallback_response(conversation: Conversation) -> ChatTurnResponse:
         reply=FALLBACK_REPLY,
         question="",
         options=[],
+        cta_buttons=[],
         allow_free_text=True,
         step=current_step_int,
         done=False,
@@ -281,9 +251,9 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
         rag_chunks = await rag_service.retrieve_context(
             db=db,
             user_id=user.id if user else None,
-            company_id=None,
+            company_id=payload.company_id,
             query=query_text,
-            top_k=8,
+            top_k=5,
         )
     except Exception:
         logger.exception("failed to retrieve RAG context")
@@ -326,33 +296,46 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
         prior_step_int = int(prior_step_value)
     except (TypeError, ValueError):
         prior_step_int = 0
-    next_step = min(prior_step_int + 1, 5)
 
     used_fallback = False
+    try:
+        llm_result = await chat_json_safe("LLM-CHAT-01-v1", messages, max_tokens=400, temperature=0.25)
+        if not llm_result.ok or not isinstance(llm_result.value, dict):
+            logger.warning("guided chat: LLM failed (%s)", llm_result.error)
+            used_fallback = True
+            result = _build_fallback_response(conversation)
+        else:
+            raw = dict(llm_result.value)
+            raw.setdefault("options", [])
+            raw.setdefault("allow_free_text", True)
+            raw.setdefault("cta_buttons", [])
 
-    llm_result = await chat_json_safe("LLM-CHAT-01-v1", messages)
-    if not llm_result.ok or not isinstance(llm_result.value, dict):
-        logger.warning("guided chat: LLM failed (%s)", llm_result.error)
-        result = _build_fallback_response(conversation)
+            try:
+                provided_step = int(raw.get("step")) if raw.get("step") is not None else None
+            except (TypeError, ValueError):
+                provided_step = None
+
+            raw.pop("conversation_id", None)
+            raw["step"] = provided_step if provided_step is not None else prior_step_int + 1
+            raw.setdefault("done", False)
+            if not raw["done"] and raw["step"] >= 5:
+                raw["done"] = True
+
+            result = ChatTurnResponse(conversation_id=conversation.id, **raw)
+    except AzureNotConfiguredError:
+        logger.exception("Azure OpenAI is not configured; using fallback response")
         used_fallback = True
-    else:
-        raw = dict(llm_result.value)
-        raw.pop("conversation_id", None)
-        raw.pop("step", None)
-        raw.setdefault("options", [])
-        raw.setdefault("allow_free_text", True)
-        done_flag = bool(raw.pop("done", False))
-        if next_step >= 5:
-            done_flag = True
+        result = _build_fallback_response(conversation)
+    except HTTPException:
+        logger.exception("HTTPException from LLM client; using fallback response")
+        used_fallback = True
+        result = _build_fallback_response(conversation)
+    except Exception:
+        logger.exception("guided chat generation failed; using fallback response")
+        used_fallback = True
+        result = _build_fallback_response(conversation)
 
-        result = ChatTurnResponse(
-            conversation_id=conversation.id,
-            step=next_step,
-            done=done_flag,
-            **raw,
-        )
-
-    conversation.step = min(prior_step_int, 5) if used_fallback else next_step
+    conversation.step = prior_step_int if used_fallback else result.step
     conversation.status = (
         ConversationStatus.COMPLETED.value if result.done else ConversationStatus.IN_PROGRESS.value
     )
