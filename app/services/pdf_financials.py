@@ -4,7 +4,10 @@ import logging
 import re
 from typing import List, Optional, TypedDict
 
-import pdfplumber
+try:
+    import pdfplumber  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency for PDF parsing
+    pdfplumber = None
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +61,9 @@ def parse_financial_pdf(file_path: str) -> ParsedFinancials:
     Parse a financial statement PDF (text-based) and extract key metrics using
     simple regex heuristics. Returns a partial dict; any missing values are None.
     """
+    if pdfplumber is None:
+        logger.warning("pdfplumber is not installed; skipping PDF parse for %s", file_path)
+        return {}
     try:
         with pdfplumber.open(file_path) as pdf:
             texts = [page.extract_text() or "" for page in pdf.pages]

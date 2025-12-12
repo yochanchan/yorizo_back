@@ -5,7 +5,10 @@ import logging
 import re
 from typing import Dict, List, Optional, Tuple
 
-import pdfplumber
+try:
+    import pdfplumber  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency for PDF parsing
+    pdfplumber = None
 
 logger = logging.getLogger(__name__)
 

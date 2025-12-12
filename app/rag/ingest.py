@@ -82,29 +82,45 @@ def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OV
     return chunks
 
 
-async def ingest_document(db: Session, document: Document) -> None:
+async def ingest_document(
+    db: Session,
+    document: Document,
+    *,
+    user_id: str | None = None,
+    company_id: str | None = None,
+    source_type: str | None = None,
+) -> None:
     if document.ingested:
         return
     if not document.storage_path or not os.path.exists(document.storage_path):
         return
+
+    user_id = user_id or document.user_id or document.company_id
+    company_id = company_id or document.company_id
+    source_type = source_type or "file"
 
     raw_text = _extract_text(document.storage_path, document.mime_type)
     chunks = _chunk_text(raw_text)
     if not chunks:
         chunks = ["[テキストを抽出できませんでしたが、資料を受け取りました]"]
 
-    collection = "global" if not document.company_id else f"company-{document.company_id}"
+    collection = "global" if not company_id else f"company-{company_id}"
     metadatas = []
     for chunk in chunks:
         metadatas.append(
             {
                 "document_id": document.id,
-                "company_id": document.company_id,
+                "user_id": user_id,
+                "company_id": company_id,
                 "doc_type": document.doc_type,
                 "period_label": document.period_label,
+                "title": document.filename,
+                "source_type": source_type,
                 "source_file": document.filename,
                 "storage_path": document.storage_path,
                 "collection": collection,
+                "owner_id": user_id or company_id,
+                "created_at": document.uploaded_at.isoformat() if document.uploaded_at else None,
             }
         )
 

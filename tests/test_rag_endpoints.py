@@ -5,12 +5,16 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
+from sqlalchemy.orm import sessionmaker
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-os.environ.setdefault("APP_ENV", "local")
+os.environ["APP_ENV"] = "test"
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 
 import models  # noqa: E402
 import database  # noqa: E402
@@ -18,24 +22,25 @@ import database  # noqa: E402
 from app.core.openai_client import LlmError, LlmResult  # noqa: E402
 
 
-@pytest.fixture(autouse=True)
-def _reset_rag_table():
-    """Ensure rag_documents schema matches the model and is empty before each test."""
-    models.Base.metadata.drop_all(bind=database.engine, tables=[models.RAGDocument.__table__])
-    models.Base.metadata.create_all(bind=database.engine, tables=[models.RAGDocument.__table__])
-    db = database.SessionLocal()
-    try:
-        db.query(models.RAGDocument).delete()
-        db.commit()
-    finally:
-        db.close()
-
-
 @pytest.fixture
 def client(monkeypatch) -> TestClient:
     """Test client with OpenAI calls mocked out."""
     sys.modules["models"] = models
     sys.modules["database"] = database
+
+    engine = create_engine(
+        "sqlite://",
+        future=True,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SessionTesting = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(database, "SessionLocal", SessionTesting)
+    from app.rag import store as rag_store
+    monkeypatch.setattr(rag_store, "SessionLocal", SessionTesting)
+    models.Base.metadata.drop_all(bind=engine)
+    models.Base.metadata.create_all(bind=engine)
 
     from app.core import openai_client as backend_openai_client
     sys.modules["app.core.openai_client"] = backend_openai_client
@@ -56,6 +61,9 @@ def client(monkeypatch) -> TestClient:
     monkeypatch.setattr(backend_openai_client, "embed_texts", fake_embed_texts)
     monkeypatch.setattr(backend_openai_client, "chat_text_safe", fake_chat_text_safe)
     monkeypatch.setattr("app.api.rag.chat_text_safe", fake_chat_text_safe, raising=False)
+
+    # Ensure tables exist for the patched in-memory DB
+    models.Base.metadata.create_all(bind=database.engine)
 
     return TestClient(app)
 

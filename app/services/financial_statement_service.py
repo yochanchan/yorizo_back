@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session
 
 from app.models import FinancialStatement
 from app.services.financial_statement_parser import parse_financial_statement_pdf, parse_japanese_sme_statement
-import pdfplumber
+
+try:
+    import pdfplumber  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency for PDF parsing
+    pdfplumber = None
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +66,9 @@ def parse_financial_pdf(path: str) -> Dict[str, Decimal]:
     Parse a Japanese BS/PL PDF and return key metrics.
     Focused on typical SME statement layouts (PL + BS totals).
     """
+    if pdfplumber is None:
+        logger.warning("pdfplumber is not installed; skipping PDF parse for %s", path)
+        return {}
     data: Dict[str, Decimal] = {}
     label_map = {
         "売上高": "sales",

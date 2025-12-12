@@ -161,7 +161,13 @@ async def upload_document(
                 logger.exception("Failed to upsert financial statement row for document %s", doc.id)
 
     try:
-        await ingest_document(db, doc)
+        await ingest_document(
+            db,
+            doc,
+            user_id=user_id,
+            company_id=company_id,
+            source_type="file",
+        )
     except Exception:
         logger.exception("failed to ingest document", extra={"document_id": doc.id})
         # Fail softly; document remains ingested=False

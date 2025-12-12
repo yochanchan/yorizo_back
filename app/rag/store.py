@@ -63,8 +63,9 @@ async def add_documents(collection_name: str, texts: List[str], metadatas: List[
     saved: List[RAGDocument] = []
     try:
         for text_value, emb, meta in zip(texts, embeddings, metadatas):
-            source_id = meta.get("source_id")
-            user_id = meta.get("user_id")
+            meta_dict = dict(meta or {})
+            source_id = meta_dict.get("source_id")
+            user_id = meta_dict.get("user_id")
             collection = collection_name
 
             doc = None
@@ -78,11 +79,11 @@ async def add_documents(collection_name: str, texts: List[str], metadatas: List[
                 doc = RAGDocument()
                 session.add(doc)
 
-            doc.user_id = user_id or meta.get("company_id") or meta.get("owner_id")
-            doc.title = meta.get("title") or text_value[:80]
-            doc.source_type = meta.get("source_type") or "document"
+            doc.user_id = user_id or meta_dict.get("company_id") or meta_dict.get("owner_id")
+            doc.title = meta_dict.get("title") or text_value[:80]
+            doc.source_type = meta_dict.get("source_type") or "document"
             doc.source_id = source_id
-            merged_meta = dict(meta or {})
+            merged_meta = dict(meta_dict)
             merged_meta["collection"] = collection
             doc.metadata_json = merged_meta
             doc.content = text_value
@@ -130,10 +131,25 @@ async def similarity_search(
         if collection_name and meta.get("collection") != collection_name:
             continue
         if filters:
-            if filters.get("user_id") and str(doc.user_id) != str(filters["user_id"]):
-                continue
-            if filters.get("company_id") and str(meta.get("company_id")) != str(filters["company_id"]):
-                continue
+            # user_id filter: only exclude when both target and doc.user_id are present and unequal
+            if filters.get("user_id") is not None and doc.user_id is not None:
+                if str(doc.user_id) != str(filters["user_id"]):
+                    continue
+            # company_id filter: allow match against metadata company_id or doc.user_id; skip only when both exist and mismatch
+            if filters.get("company_id") is not None:
+                meta_company = meta.get("company_id")
+                company_match = False
+                if meta_company is not None and str(meta_company) == str(filters["company_id"]):
+                    company_match = True
+                if doc.user_id is not None and str(doc.user_id) == str(filters["company_id"]):
+                    company_match = True
+                if meta_company is not None or doc.user_id is not None:
+                    if not company_match:
+                        continue
+            if filters.get("source_types"):
+                source_val = meta.get("source_type") or doc.source_type
+                if source_val and source_val not in filters["source_types"]:
+                    continue
 
         emb = doc.embedding
         if not emb:
@@ -211,11 +227,19 @@ async def index_documents(documents: List[Dict[str, Any]], default_user_id: Opti
     return await add_documents("global", texts, metas)
 
 
-async def query_similar(question: str, k: int = 5, user_id: Optional[str] = None, company_id: Optional[str] = None) -> List[Dict[str, Any]]:
+async def query_similar(
+    question: str,
+    k: int = 5,
+    user_id: Optional[str] = None,
+    company_id: Optional[str] = None,
+    source_types: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     collection = f"company-{company_id}" if company_id else "global"
     filters: Dict[str, Any] = {}
     if user_id:
         filters["user_id"] = user_id
     if company_id:
         filters["company_id"] = company_id
+    if source_types:
+        filters["source_types"] = source_types
     return await similarity_search(collection, question, k=k, filters=filters)

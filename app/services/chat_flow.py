@@ -251,7 +251,7 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
         rag_chunks = await rag_service.retrieve_context(
             db=db,
             user_id=user.id if user else None,
-            company_id=None,
+            company_id=payload.company_id,
             query=query_text,
             top_k=5,
         )

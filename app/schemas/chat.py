@@ -19,6 +19,7 @@ class GuidedUserSelection(BaseModel):
 class ChatTurnRequest(BaseModel):
     conversation_id: Optional[str] = None
     user_id: Optional[str] = None
+    company_id: Optional[str] = None
     selection: Optional[GuidedUserSelection] = None
     message: Optional[str] = Field(None, description="Free text input from the user (legacy)")
     selected_option_id: Optional[str] = Field(None, description="Option chosen by the user (legacy)")
