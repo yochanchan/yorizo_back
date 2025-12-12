@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-import asyncio
+import inspect
 import json
 import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, TypeVar, Union, cast
 
-from dotenv import load_dotenv
 from fastapi import HTTPException
-from openai import AzureOpenAI, OpenAIError
+from openai import AsyncOpenAI, AzureOpenAI, OpenAIError
 from openai.types.chat import ChatCompletionMessageParam
 
-load_dotenv()
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+_client: Optional[AsyncOpenAI] = None
 T = TypeVar("T")
 
 # Restrict messages to the OpenAI chat message type for stronger type safety.
@@ -46,79 +46,31 @@ class LlmResult(Generic[T]):
     error: Optional[LlmError] = None
 
 
-@dataclass
-class AzureOpenAIConfig:
-    endpoint: str | None
-    api_key: str | None
-    api_version: str | None
-    chat_deployment: str | None
-    embedding_deployment: str | None
-
-    @classmethod
-    def from_env(cls) -> "AzureOpenAIConfig":
-        return cls(
-            endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
-            chat_deployment=os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT"),
-            embedding_deployment=os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT"),
-        )
-
-
-_azure_client: AzureOpenAI | None = None
-_azure_config: AzureOpenAIConfig | None = None
-
-
-def _get_config(*, require_embedding: bool = False) -> AzureOpenAIConfig:
-    """
-    Load Azure OpenAI config from the environment.
-    Embedding deployment is only enforced when explicitly requested.
-    """
-    global _azure_config
-    if _azure_config is None:
-        _azure_config = AzureOpenAIConfig.from_env()
-
-    cfg = cast(AzureOpenAIConfig, _azure_config)
-    required = [
-        ("AZURE_OPENAI_ENDPOINT", cfg.endpoint),
-        ("AZURE_OPENAI_API_KEY", cfg.api_key),
-        ("AZURE_OPENAI_API_VERSION", cfg.api_version),
-        ("AZURE_OPENAI_CHAT_DEPLOYMENT", cfg.chat_deployment),
-    ]
-    if require_embedding:
-        required.append(("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", cfg.embedding_deployment))
-
-    missing = [name for name, value in required if not value]
-    logger.debug(
-        "Azure OpenAI config present flags: %s",
-        {
-            "endpoint": bool(cfg.endpoint),
-            "api_key": bool(cfg.api_key),
-            "api_version": bool(cfg.api_version),
-            "chat_deployment": bool(cfg.chat_deployment),
-            "embedding_deployment": bool(cfg.embedding_deployment),
-        },
+# Azure chat client (required for chat completions)
+azure_client: AzureOpenAI | None = None
+if (
+    settings.azure_openai_endpoint
+    and settings.azure_openai_api_key
+    and settings.azure_openai_chat_deployment
+):
+    azure_client = AzureOpenAI(
+        api_key=settings.azure_openai_api_key,
+        api_version=settings.azure_openai_api_version,
+        azure_endpoint=settings.azure_openai_endpoint,
     )
-    if missing:
-        logger.warning("Azure OpenAI not configured; missing keys: %s", ", ".join(missing))
+
+
+def _get_azure_client() -> AzureOpenAI:
+    if azure_client is None:
         raise AzureNotConfiguredError("Azure OpenAI is not configured")
-    return cfg
+    return azure_client
 
 
-def _get_client() -> AzureOpenAI:
-    global _azure_client
-    cfg = _get_config()
-    if _azure_client is None:
-        _azure_client = AzureOpenAI(
-            api_key=cfg.api_key,
-            api_version=cfg.api_version,
-            azure_endpoint=cfg.endpoint,
-        )
-    return cast(AzureOpenAI, _azure_client)
-
-
-def _resolve_response(resp: Any):
-    return resp
+def _get_azure_model() -> str:
+    model = settings.azure_openai_chat_deployment
+    if not model:
+        raise AzureNotConfiguredError("Azure OpenAI is not configured")
+    return cast(str, model)
 
 
 def chat_completion_json(
@@ -131,19 +83,19 @@ def chat_completion_json(
     temperature is accepted for compatibility but ignored (some deployments only allow the default).
     """
     try:
-        client = _get_client()
-        cfg = _get_config()
+        client = _get_azure_client()
         params: Dict[str, Any] = {
-            "model": cfg.chat_deployment,
+            "model": _get_azure_model(),
             "messages": _as_message_list(messages),
             "response_format": {"type": "json_object"},
         }
         if max_tokens is not None:
-            params["max_tokens"] = max_tokens
-        resp = _resolve_response(client.chat.completions.create(**params))
+            params["max_completion_tokens"] = max_tokens
+        if temperature is not None:
+            params["temperature"] = temperature
+        resp = client.chat.completions.create(**params)
         return resp.choices[0].message.content or "{}"
     except AzureNotConfiguredError:
-        logger.warning("Azure OpenAI is not configured; cannot complete chat (json).")
         raise
     except OpenAIError as exc:  # pragma: no cover - upstream error handling
         logger.exception("Azure OpenAI error during chat completion")
@@ -161,18 +113,14 @@ def chat_completion_text(
     Call Azure OpenAI (chat completions) for plain text responses.
     """
     try:
-        client = _get_client()
-        cfg = _get_config()
-        resp = _resolve_response(
-            client.chat.completions.create(
-                model=cfg.chat_deployment,
-                messages=_as_message_list(messages),
-                temperature=temperature,
-            )
+        client = _get_azure_client()
+        resp = client.chat.completions.create(
+            model=_get_azure_model(),
+            messages=_as_message_list(messages),
+            temperature=temperature,
         )
         return resp.choices[0].message.content or ""
     except AzureNotConfiguredError:
-        logger.warning("Azure OpenAI is not configured; cannot complete chat (text).")
         raise
     except OpenAIError as exc:  # pragma: no cover
         logger.exception("Azure OpenAI error during text completion")
@@ -180,6 +128,38 @@ def chat_completion_text(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Unexpected error during text completion")
         raise HTTPException(status_code=500, detail="chat generation failed") from exc
+
+
+# --- Existing utilities (embeddings & summaries) keep OpenAI embeddings for now ---
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+
+
+def get_client() -> AsyncOpenAI:
+    """
+    Return a singleton AsyncOpenAI client using settings (not raw os.getenv).
+
+    - Prefer azure_openai_api_key; fallback to openai_api_key if provided.
+    - Optionally use openai_base_url when set (for Azure-compatible endpoints or proxies).
+    """
+    global _client
+    if _client is not None:
+        return _client
+
+    api_key = settings.azure_openai_api_key or settings.openai_api_key
+    if not api_key:
+        raise RuntimeError("AZURE_OPENAI_API_KEY is not set.")
+
+    base_url = settings.openai_base_url
+
+    if base_url:
+        _client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+        )
+    else:
+        _client = AsyncOpenAI(api_key=api_key)
+
+    return _client
 
 
 async def generate_chat_reply(
@@ -198,7 +178,7 @@ async def generate_chat_reply(
 
 async def embed_texts(texts: Union[str, List[str]]) -> List[List[float]]:
     """
-    Create vector embeddings for a single text or a list of texts using Azure OpenAI embeddings.
+    Create vector embeddings for a single text or a list of texts using the OpenAI embeddings API.
     """
     if isinstance(texts, str):
         input_texts = [texts]
@@ -208,21 +188,17 @@ async def embed_texts(texts: Union[str, List[str]]) -> List[List[float]]:
     if not input_texts:
         return []
 
-    try:
-        cfg = _get_config(require_embedding=True)
-        client = _get_client()
-        resp = await asyncio.to_thread(
-            client.embeddings.create,
-            model=cfg.embedding_deployment,
-            input=input_texts,
-        )
-        return [item.embedding for item in resp.data]
-    except AzureNotConfiguredError:
-        logger.warning("Azure OpenAI embedding error: Azure OpenAI is not configured")
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Azure OpenAI embedding error")
-        raise
+    client = get_client()
+    model_name = getattr(settings, "openai_model_embedding", DEFAULT_EMBEDDING_MODEL) or DEFAULT_EMBEDDING_MODEL
+
+    resp = client.embeddings.create(
+        model=model_name,
+        input=input_texts,
+    )
+    if inspect.isawaitable(resp):
+        resp = await resp
+
+    return [item.embedding for item in resp.data]
 
 
 async def generate_consultation_memo(
@@ -293,9 +269,10 @@ async def chat_json_safe(
     prompt_id: str,
     messages: Sequence[ChatMessage],
     max_tokens: int | None = None,
+    temperature: float | None = None,
 ) -> LlmResult[dict]:
     try:
-        raw_json = chat_completion_json(messages, max_tokens=max_tokens)
+        raw_json = chat_completion_json(messages, temperature=temperature, max_tokens=max_tokens)
         data = json.loads(raw_json or "{}")
         if not isinstance(data, dict):
             raise ValueError("LLM JSON response was not a dict")
