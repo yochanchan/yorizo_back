@@ -8,7 +8,7 @@ from typing import List, Optional
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.openai_client import AzureNotConfiguredError, chat_json_safe
+from app.core.openai_client import chat_json_safe
 from app.models import CompanyProfile, Conversation, Document, Memory, Message, User
 from app.models.enums import ConversationStatus
 from app.schemas.chat import ChatTurnRequest, ChatTurnResponse
@@ -23,8 +23,8 @@ SYSTEM_PROMPT = """
 【出力形式（最重要）】
 ・必ず JSON オブジェクトを 1 つだけ返します。
 ・前後に説明文やマークダウン、コードブロック（```）などは一切書きません。
-・トップレベルのキーは次の 6 つだけにします:
-  "reply", "question", "options", "allow_free_text", "step", "done"
+・トップレベルのキーは次の 5 つだけにします:
+  "reply", "question", "options", "allow_free_text", "done"
 ・すべてのキーと文字列はダブルクォートで囲み、末尾カンマは禁止、true/false は小文字の JSON boolean にします。
 
 【各フィールドの仕様】
@@ -32,8 +32,7 @@ SYSTEM_PROMPT = """
 1. "reply": string
 ・日本語 200 文字以内・最大 2 段落（各 2〜3 文）。
 ・「共感 → 状況の簡単な整理 → 今できる具体的な一歩」を短く伝えます。
-・ユーザーに新しい資料の準備や長時間かかる作業は原則として求めず、今ここで答えやすい範囲にとどめます。
-・あとで出す "question" の内容と自然につながるように書きます。
+・ユーザーが答えやすいよう、複数の選択肢を提案する形で、あとで出す "question" の内容と自然につながるように書きます。
 
 2. "question": string
 ・日本語 30 文字以内の質問文 1 文。
@@ -49,14 +48,10 @@ SYSTEM_PROMPT = """
 ・"question" に対応する、ユーザーがすぐに選べる選択肢だけを並べます。
 
 4. "allow_free_text": boolean
-・常に true を返します。
+・自由入力を許可するか。基本は true を返します。
 
-5. "step": number
-・JSON の整数として返します（"1" のような文字列にはしません）。
-・通常は 1 から始まり、会話が進むごとに +1 していくなど、システム側のルールに従います。
-
-6. "done": boolean
-・会話をここで締めたいとき true、まだ続けるときは false にします。
+5. "done": boolean
+・会話をここで締めたいとき true。基本は false。
 
 【スタイル】
 ・相手の感情に寄り添いながら、「いま分かっている事実」と「今日からできる小さな一歩」を優先して伝えます。
@@ -331,42 +326,33 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
         prior_step_int = int(prior_step_value)
     except (TypeError, ValueError):
         prior_step_int = 0
+    next_step = min(prior_step_int + 1, 5)
 
-    try:
-        llm_result = await chat_json_safe("LLM-CHAT-01-v1", messages)
-        print(messages)
-        if not llm_result.ok or not isinstance(llm_result.value, dict):
-            logger.warning("guided chat: LLM failed (%s)", llm_result.error)
-            result = _build_fallback_response(conversation)
-        else:
-            raw = dict(llm_result.value)
-            raw.setdefault("options", [])
-            raw.setdefault("allow_free_text", True)
-            # 旧仕様のキーが返ってきた場合は無視する
+    used_fallback = False
 
-            try:
-                provided_step = int(raw.get("step")) if raw.get("step") is not None else None
-            except (TypeError, ValueError):
-                provided_step = None
-
-            raw.pop("conversation_id", None)
-            raw["step"] = provided_step if provided_step is not None else prior_step_int + 1
-            raw.setdefault("done", False)
-            if not raw["done"] and raw["step"] >= 5:
-                raw["done"] = True
-
-            result = ChatTurnResponse(conversation_id=conversation.id, **raw)
-    except AzureNotConfiguredError:
-        logger.exception("Azure OpenAI is not configured; using fallback response")
+    llm_result = await chat_json_safe("LLM-CHAT-01-v1", messages)
+    if not llm_result.ok or not isinstance(llm_result.value, dict):
+        logger.warning("guided chat: LLM failed (%s)", llm_result.error)
         result = _build_fallback_response(conversation)
-    except HTTPException:
-        logger.exception("HTTPException from LLM client; using fallback response")
-        result = _build_fallback_response(conversation)
-    except Exception:
-        logger.exception("guided chat generation failed; using fallback response")
-        result = _build_fallback_response(conversation)
+        used_fallback = True
+    else:
+        raw = dict(llm_result.value)
+        raw.pop("conversation_id", None)
+        raw.pop("step", None)
+        raw.setdefault("options", [])
+        raw.setdefault("allow_free_text", True)
+        done_flag = bool(raw.pop("done", False))
+        if next_step >= 5:
+            done_flag = True
 
-    conversation.step = prior_step_int if result.reply == FALLBACK_REPLY else result.step
+        result = ChatTurnResponse(
+            conversation_id=conversation.id,
+            step=next_step,
+            done=done_flag,
+            **raw,
+        )
+
+    conversation.step = min(prior_step_int, 5) if used_fallback else next_step
     conversation.status = (
         ConversationStatus.COMPLETED.value if result.done else ConversationStatus.IN_PROGRESS.value
     )
@@ -375,7 +361,7 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
     db.add(conversation)
     db.commit()
 
-    if result.reply != FALLBACK_REPLY:
+    if not used_fallback:
         assistant_payload = result.model_dump()
         assistant_payload["conversation_id"] = conversation.id
         _persist_message(db, conversation, "assistant", json.dumps(assistant_payload, ensure_ascii=False))
