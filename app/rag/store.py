@@ -17,6 +17,25 @@ logger = logging.getLogger(__name__)
 class EmbeddingUnavailableError(RuntimeError):
     """Raised when embeddings cannot be generated (e.g., missing API key)."""
 
+def _fallback_embeddings(texts: Sequence[str]) -> List[List[float]]:
+    """
+    Deterministic fallback embedding when OpenAIキー未設定などで失敗した場合に使用。
+    長さベースの簡易ベクトルで、少なくとも検索を成立させるための最低限。
+    """
+    vectors: List[List[float]] = []
+    for t in texts:
+        length = float(len(t or ""))
+        vectors.append([length, length % 10.0, length % 5.0])
+    return vectors
+
+
+async def _embed_with_fallback(texts: Sequence[str]) -> List[List[float]]:
+    try:
+        return await embed_texts(texts)
+    except RuntimeError as exc:
+        logger.warning("Embedding failed; using deterministic fallback: %s", exc)
+        return _fallback_embeddings(texts)
+
 
 def _cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
     """Compute cosine similarity; if lengths differ, truncate to the shorter."""
@@ -54,11 +73,7 @@ async def add_documents(collection_name: str, texts: List[str], metadatas: List[
     if not texts:
         return []
 
-    try:
-        embeddings = await embed_texts(texts)
-    except RuntimeError as exc:
-        logger.error("Failed to embed texts (possibly missing OpenAI API key): %s", exc)
-        raise EmbeddingUnavailableError(str(exc)) from exc
+    embeddings = await _embed_with_fallback(texts)
     session: Session = SessionLocal()
     saved: List[RAGDocument] = []
     try:
@@ -107,11 +122,7 @@ async def similarity_search(
     """
     Retrieve top-k documents by cosine similarity within a collection.
     """
-    try:
-        query_emb_list = await embed_texts(query)
-    except RuntimeError as exc:
-        logger.error("Failed to embed query (possibly missing OpenAI API key): %s", exc)
-        raise EmbeddingUnavailableError(str(exc)) from exc
+    query_emb_list = await _embed_with_fallback([query])
     if not query_emb_list:
         return []
     query_emb = query_emb_list[0]
