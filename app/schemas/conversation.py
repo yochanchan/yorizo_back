@@ -44,6 +44,7 @@ class ConversationDetail(BaseModel):
 class ConsultationMemoResponse(BaseModel):
     current_points: List[str]
     important_points: List[str]
+    created_at: datetime
     updated_at: datetime
 
 

@@ -79,6 +79,7 @@ def test_get_memo_generates_and_reuses_existing_record(client_base: TestClient, 
     data1 = resp1.json()
     assert data1["current_points"] == ["current-point"]
     assert data1["important_points"] == ["important-point"]
+    assert data1["created_at"]
     assert data1["updated_at"]
 
     resp2 = client_base.get(f"/api/conversations/{conversation_id}/memo")
@@ -87,5 +88,12 @@ def test_get_memo_generates_and_reuses_existing_record(client_base: TestClient, 
 
     assert data2["current_points"] == data1["current_points"]
     assert data2["important_points"] == data1["important_points"]
+    assert data2["created_at"] == data1["created_at"]
     assert data2["updated_at"]
     assert calls["count"] == 1
+
+    resp3 = client_base.post(f"/api/conversations/{conversation_id}/memo/refresh")
+    assert resp3.status_code == 200, resp3.text
+    data3 = resp3.json()
+    assert data3["created_at"] == data1["created_at"]
+    assert data3["updated_at"]

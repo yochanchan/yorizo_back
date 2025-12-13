@@ -124,10 +124,13 @@ async def get_consultation_memo(conversation_id: str, db: Session = Depends(get_
     if memo is None:
         memo = await _build_and_save_memo(db, conversation)
 
+    created_at = memo.created_at or memo.updated_at or datetime.utcnow()
+    updated_at = memo.updated_at or created_at
     return ConsultationMemoResponse(
         current_points=_parse_points(memo.current_points),
         important_points=_parse_points(memo.important_points),
-        updated_at=memo.updated_at or memo.created_at or datetime.utcnow(),
+        created_at=created_at,
+        updated_at=updated_at,
     )
 
 
@@ -171,10 +174,13 @@ async def refresh_consultation_memo(conversation_id: str, db: Session = Depends(
 
     memo = await _build_and_save_memo(db, conversation)
 
+    created_at = memo.created_at or memo.updated_at or datetime.utcnow()
+    updated_at = memo.updated_at or created_at
     return ConsultationMemoResponse(
         current_points=_parse_points(memo.current_points),
         important_points=_parse_points(memo.important_points),
-        updated_at=memo.updated_at or memo.created_at or datetime.utcnow(),
+        created_at=created_at,
+        updated_at=updated_at,
     )
 
 
