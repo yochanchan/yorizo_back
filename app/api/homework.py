@@ -16,7 +16,7 @@ from app.schemas.homework import (
 )
 from app.models.enums import HomeworkStatus
 from database import get_db
-from app.models import HomeworkTask, User
+from app.models import HomeworkTask, User, Conversation
 
 router = APIRouter()
 
@@ -60,13 +60,22 @@ def list_homework_tasks(
 @router.post("/homework", response_model=HomeworkTaskRead, status_code=status.HTTP_201_CREATED)
 def create_homework_task(payload: HomeworkTaskCreate, db: Session = Depends(get_db)) -> HomeworkTask:
     _ensure_user(db, payload.user_id)
+    conversation_id = payload.conversation_id or None
+    if conversation_id:
+        exists = db.query(Conversation.id).filter(Conversation.id == conversation_id).first()
+        if not exists:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="指定された会話が見つかりません。conversation_idを確認してください。",
+            )
     task = HomeworkTask(
         user_id=payload.user_id,
-        conversation_id=payload.conversation_id,
+        conversation_id=conversation_id,
         title=payload.title,
         detail=payload.detail,
         category=payload.category,
         status=(payload.status or HomeworkStatus.PENDING).value,
+        timeframe=payload.timeframe,
         due_date=payload.due_date,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
@@ -93,16 +102,25 @@ class HomeworkBulkCreate(BaseModel):
 @router.post("/homework/bulk-from-suggestions", response_model=List[HomeworkTaskRead])
 def bulk_create_homework_tasks(payload: HomeworkBulkCreate, db: Session = Depends(get_db)) -> List[HomeworkTask]:
     _ensure_user(db, payload.user_id)
+    conversation_id = payload.conversation_id or None
+    if conversation_id:
+        exists = db.query(Conversation.id).filter(Conversation.id == conversation_id).first()
+        if not exists:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="指定された会話が見つかりません。conversation_idを確認してください。",
+            )
     created: List[HomeworkTask] = []
     now = datetime.utcnow()
     for item in payload.tasks:
         task = HomeworkTask(
             user_id=payload.user_id,
-            conversation_id=payload.conversation_id,
+            conversation_id=conversation_id,
             title=item.title,
             detail=item.detail,
             category=item.category,
             status=HomeworkStatus.PENDING.value,
+            timeframe=None,
             due_date=item.due_date,
             created_at=now,
             updated_at=now,
@@ -127,6 +145,8 @@ def update_homework_task(task_id: int, payload: HomeworkTaskUpdate, db: Session 
         task.detail = payload.detail
     if payload.category is not None:
         task.category = payload.category
+    if payload.timeframe is not None:
+        task.timeframe = payload.timeframe
     if payload.due_date is not None:
         task.due_date = payload.due_date
     if payload.status is not None:
