@@ -8,11 +8,13 @@ from typing import List, Optional, cast
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.agents.knowledge_search_agent import search_knowledge
 from app.core.openai_client import AzureNotConfiguredError, ChatMessage, chat_json_safe
 from app.models import CompanyProfile, Conversation, Document, Memory, Message, User
 from app.models.enums import ConversationStatus
-from app.schemas.chat import ChatTurnRequest, ChatTurnResponse
+from app.schemas.chat import ChatTurnRequest, ChatTurnResponse, Citation
 from app.services import rag as rag_service
+from app.schemas.chat import ChatMessageInput
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +58,12 @@ SYSTEM_PROMPT = """
 【スタイル】
 ・相手の感情に寄り添いながら、「いま分かっている事実」と「今日からできる小さな一歩」を優先して伝えます。
 ・分からない数字や事実は新しく作らず、「まだ分かりません」などと率直に伝えます。
+・ユーザーが言っていない前提は置かず、決めつけの語尾（〜ですよね 等）は避けます。根拠が不足する場合は「不足しているので確認したい」など条件付きで述べます。
 
 この仕様どおりの JSON オブジェクトだけを出力してください。
 """.strip()
 
 FALLBACK_REPLY = "Yorizo が考えるのに失敗しました。管理者にお問い合わせください。"
-
 
 def _ensure_user(db: Session, user_id: Optional[str]) -> Optional[User]:
     if not user_id:
@@ -242,7 +244,7 @@ def _build_fallback_response(conversation: Conversation) -> ChatTurnResponse:
 
 
 async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResponse:
-    if not payload.message and not payload.selected_option_id and not payload.selection:
+    if not payload.message and not payload.selected_option_id and not payload.selection and not payload.messages:
         raise HTTPException(status_code=400, detail="メッセージまたは選択肢を送信してください")
 
     user = _ensure_user(db, payload.user_id or "demo-user")
@@ -258,7 +260,7 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
     selection = payload.selection
     choice_id = None
     choice_label = None
-    free_text = None
+    free_text = payload.message
 
     if selection:
         if selection.type == "choice":
@@ -269,7 +271,12 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
 
     if not selection:
         choice_id = payload.selected_option_id
-        free_text = payload.message
+        if not free_text and payload.messages:
+            # use last user message from messages array
+            for m in reversed(payload.messages):
+                if m.role == "user" and m.content:
+                    free_text = m.content
+                    break
 
     if not free_text and not choice_label and not choice_id:
         raise HTTPException(status_code=400, detail="入力が空です。メッセージまたは選択肢を送信してください")
@@ -280,7 +287,7 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
     user_entries: List[str] = []
     if choice_id:
         user_entries.append(f"[choice_id:{choice_id}] {display_text}")
-    else:
+    elif display_text:
         user_entries.append(display_text.strip())
 
     for text in user_entries:
@@ -291,6 +298,17 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
         conversation.main_concern = user_entries[0][:255]
 
     query_text = free_text or option_label or conversation.main_concern or (payload.category or "経営に関する相談")
+    # augment query with domain hints to hit relevant chapters
+    extra_terms: List[str] = []
+    text_for_hint = (display_text or "") + " " + (choice_label or "") + " " + (payload.category or "")
+    if any(k in text_for_hint for k in ["売上", "販売", "需要", "価格", "販路"]):
+        extra_terms.extend(["売上", "需要", "価格転嫁", "付加価値", "販路"])
+    if any(k in text_for_hint for k in ["採用", "人材", "人手", "人材不足"]):
+        extra_terms.extend(["人手不足", "賃上げ", "省力化", "外部人材", "デジタル化"])
+    if any(k in text_for_hint for k in ["資金", "資金繰り", "キャッシュ", "借入"]):
+        extra_terms.extend(["資金繰り", "キャッシュフロー", "借入", "返済", "補助金"])
+    if extra_terms:
+        query_text = f"{query_text} " + " ".join(extra_terms)
 
     try:
         rag_chunks = await rag_service.retrieve_context(
@@ -310,6 +328,42 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
         all_chunks.extend(rag_chunks)
     if structured_chunks:
         all_chunks.extend(structured_chunks)
+
+    # knowledge search
+    citations: List[Citation] = []
+    try:
+        knowledge_hits = await search_knowledge(query_text, top_k=5)
+        keywords = [k for k in ["売上", "需要", "価格", "販路", "採用", "人材", "人手", "人材不足", "資金", "資金繰り", "キャッシュ", "賃上げ", "省力化", "外部人材", "デジタル"] if k in query_text]
+        filtered_hits = [
+            h
+            for h in knowledge_hits
+            if any(
+                kw in (h.get("snippet") or "") or kw in (h.get("source_title") or "")
+                for kw in keywords
+            )
+        ] if keywords else []
+        hits_for_use = filtered_hits or knowledge_hits
+        for idx, hit in enumerate(hits_for_use, 1):
+            txt = hit.get("snippet") or hit.get("text") or ""
+            title = hit.get("source_title") or ""
+            page = hit.get("page")
+            path = hit.get("source_path")
+            score = hit.get("score")
+            excerpt = txt if len(txt) <= 400 else txt[:400] + "..."
+            all_chunks.append(f"[参考{idx}] {title} p.{page or '?'}\n{excerpt}")
+            citations.append(
+                Citation(
+                    title=title,
+                    page=page,
+                    path=path,
+                    score=score,
+                    snippet=txt,
+                )
+            )
+        if hits_for_use:
+            logger.info("[knowledge] candidates=%s top_score=%s", len(hits_for_use), hits_for_use[0].get("score"))
+    except Exception:
+        logger.exception("knowledge search failed")
 
     if all_chunks:
         context_text = "\n\n".join(all_chunks)
@@ -353,6 +407,7 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
             raw = dict(llm_result.value)
             raw.setdefault("options", [])
             raw.setdefault("allow_free_text", True)
+            raw["citations"] = [c.model_dump() for c in citations] if citations else []
 
             raw.pop("conversation_id", None)
             raw.pop("step", None)
@@ -377,6 +432,9 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
         logger.exception("guided chat generation failed; using fallback response")
         used_fallback = True
         result = _build_fallback_response(conversation)
+
+    result.citations = citations
+    logger.info("[guided] citations_len=%s", len(citations))
 
     conversation.step = prior_step_int if used_fallback else result.step
     conversation.status = (

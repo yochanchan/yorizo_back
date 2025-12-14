@@ -1,0 +1,451 @@
+﻿from __future__ import annotations
+
+import json
+import logging
+import time
+from datetime import datetime
+from typing import List, Optional, cast
+
+from fastapi import HTTPException
+from sqlalchemy.orm import Session
+
+from app.agents.knowledge_search_agent import search_knowledge
+from app.core.openai_client import AzureNotConfiguredError, ChatMessage, chat_json_safe
+from app.models import CompanyProfile, Conversation, Document, Memory, Message, User
+from app.models.enums import ConversationStatus
+from app.schemas.chat import ChatTurnRequest, ChatTurnResponse, Citation
+from app.services import rag as rag_service
+from app.schemas.chat import ChatMessageInput
+
+logger = logging.getLogger(__name__)
+
+SYSTEM_PROMPT = """
+あなたは共感的な経営相談AI「Yorizo」です。Ubieの問診のように、短く・段階的・迷わせず、「今すぐ動ける一手」まで具体化します。専門用語は使わず、決めつけず、根拠が薄いときは「不足しているので確認したい」と条件付きで述べます。
+
+【出力形式（最重要）】
+必ず JSON オブジェクトを 1 つだけ返します。前後に説明やマークダウンやコードブロックは付けません。トップレベルのキーは "reply", "question", "options", "allow_free_text", "done" のみ。すべてダブルクォート、末尾カンマなし、true/false は小文字。
+
+【作り方（Ubie風）】
+- reply: 2〜6行で短く。最初にユーザー発言を1行要約（復唱）。次に原因の切り分けを最大3点（箇条書き可）。最後に「今日やる1つ」「今週やる3つ」に落とした具体策を提示。絵文字は少しだけ可。
+- question: 次に聞く質問を1つだけ。15〜30文字程度。問診スタイルで「A/B/Cどれ？」なども可。
+- options: 2〜4個。idは英小文字+アンダースコア、label/value は15文字以内で question に自然につながる具体的な選択肢にする。
+- allow_free_text: true を基本にする。
+- done: 会話を締めるときのみ true。基本は false。
+
+【踏み込みルール（一般論禁止）】
+- 飲食店SNSなら、投稿の型（構図/枚数/順番）、キャプション雛形、導線（地名・営業時間・予約）を必ず含める。
+- 提案は「今日やる1つ」「今週やる3つ」に落とし込む。数値が置けるなら入れる（例: 週3回、10投稿テンプレなど）。
+- 情報が薄いときは前提を置いて提案し、最後に確認質問で補正する。
+
+この仕様どおりの JSON オブジェクトだけを出力してください。""".strip()
+
+FALLBACK_REPLY = "Yorizo 縺瑚・∴繧九・縺ｫ螟ｱ謨励＠縺ｾ縺励◆縲らｮ｡逅・・↓縺雁撫縺・粋繧上○縺上□縺輔＞縲・
+
+def _ensure_user(db: Session, user_id: Optional[str]) -> Optional[User]:
+    if not user_id:
+        return None
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        return user
+    user = User(id=user_id, nickname="繧ｲ繧ｹ繝・)
+    db.add(user)
+    db.commit()
+    return user
+
+
+def _get_or_create_conversation(
+    db: Session, conversation_id: Optional[str], user: Optional[User], category: Optional[str]
+) -> Conversation:
+    if conversation_id:
+        conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if conv:
+            if category and not conv.category:
+                conv.category = category
+                db.add(conv)
+                db.commit()
+            return conv
+    conv = Conversation(
+        user_id=user.id if user else None,
+        started_at=datetime.utcnow(),
+        channel="chat",
+        category=category,
+        status=ConversationStatus.IN_PROGRESS.value,
+        step=0,
+    )
+    db.add(conv)
+    db.commit()
+    db.refresh(conv)
+    return conv
+
+
+def _persist_message(db: Session, conversation: Conversation, role: str, content: str) -> Message:
+    msg = Message(
+        conversation_id=conversation.id,
+        role=role,
+        content=content,
+        created_at=datetime.utcnow(),
+    )
+    db.add(msg)
+    db.commit()
+    db.refresh(msg)
+    return msg
+
+
+def _find_option_label(messages: List[Message], option_id: str) -> Optional[str]:
+    for msg in reversed(messages):
+        if msg.role != "assistant":
+            continue
+        try:
+            data = json.loads(msg.content)
+            for opt in data.get("options") or []:
+                if isinstance(opt, dict) and opt.get("id") == option_id:
+                    return opt.get("label") or opt.get("value")
+        except Exception:
+            continue
+    return None
+
+
+def _history_as_text(messages: List[Message]) -> str:
+    """逶ｴ霑代・莨夊ｩｱ繧定ｪｭ縺ｿ繧・☆縺・ユ繧ｭ繧ｹ繝医↓謨ｴ蠖｢縺吶ｋ縲・""
+    lines: List[str] = []
+    for msg in messages[-5:]:
+        if msg.role == "assistant":
+            try:
+                data = json.loads(msg.content)
+                reply = data.get("reply") or data.get("message")
+                question = data.get("question")
+                if reply:
+                    lines.append(f"Yorizo: {reply}")
+                if question:
+                    lines.append(f"雉ｪ蝠・ {question}")
+            except Exception:
+                lines.append(f"Yorizo: {msg.content}")
+        else:
+            lines.append(f"繝ｦ繝ｼ繧ｶ繝ｼ: {msg.content}")
+    return "\n".join(lines)
+
+
+def _collect_structured_context(db: Session, user: Optional[User], conversation: Conversation) -> List[str]:
+    """
+    /company, /memory, /documents 縺ｮ諠・ｱ繧呈律譛ｬ隱槭ユ繧ｭ繧ｹ繝医↓謨ｴ蠖｢縺励※霑斐☆縲・
+    """
+    del conversation  # 蟆・擂縺ｮ諡｡蠑ｵ菴吝慍
+    pieces: List[str] = []
+    if not user:
+        return pieces
+
+    user_id = cast(str, user.id)
+
+    profile = db.query(CompanyProfile).filter(CompanyProfile.user_id == user_id).first()
+    if profile:
+        company_name = cast(Optional[str], profile.company_name)
+        industry = cast(Optional[str], profile.industry)
+        employees_range = cast(Optional[str], profile.employees_range)
+        annual_sales_range = cast(Optional[str], profile.annual_sales_range)
+        location_prefecture = cast(Optional[str], profile.location_prefecture)
+        pieces.append(
+            "縲蝉ｼ夂､ｾ諠・ｱ縲曾n"
+            f"莨夂､ｾ蜷・ {company_name or '譛ｪ逋ｻ骭ｲ'}\n"
+            f"讌ｭ遞ｮ: {industry or '譛ｪ逋ｻ骭ｲ'}\n"
+            f"蠕捺･ｭ蜩｡謨ｰ: {employees_range or '譛ｪ逋ｻ骭ｲ'}\n"
+            f"蟷ｴ蝠・Ξ繝ｳ繧ｸ: {annual_sales_range or '譛ｪ逋ｻ骭ｲ'}\n"
+            f"謇蝨ｨ蝨ｰ: {location_prefecture or '譛ｪ逋ｻ骭ｲ'}\n"
+        )
+
+    memory = (
+        db.query(Memory)
+        .filter(Memory.user_id == user_id)
+        .order_by(Memory.last_updated_at.desc())
+        .first()
+    )
+    if memory:
+        current_concerns = cast(Optional[str], memory.current_concerns)
+        important_points = cast(Optional[str], memory.important_points)
+        remembered_facts = cast(Optional[str], memory.remembered_facts)
+        lines = ["縲榛orizo縺ｮ險俶・縲・]
+        if current_concerns:
+            lines.append(f"- 迴ｾ蝨ｨ豌励↓縺ｪ縺｣縺ｦ縺・ｋ縺薙→: {current_concerns}")
+        if important_points:
+            lines.append(f"- 蟆る摩螳ｶ縺ｫ莨昴∴縺溘＞繝昴う繝ｳ繝・ {important_points}")
+        if remembered_facts:
+            lines.append(f"- 譛霑代・繝｡繝｢: {remembered_facts}")
+        pieces.append("\n".join(lines))
+
+    docs = (
+        db.query(Document)
+        .filter(Document.user_id == user_id)
+        .order_by(Document.uploaded_at.desc())
+        .limit(3)
+        .all()
+    )
+    if docs:
+        lines = ["縲舌い繝・・繝ｭ繝ｼ繝峨＆繧後◆雉・侭・育峩霑托ｼ峨・]
+        for doc in docs:
+            doc_type = cast(Optional[str], doc.doc_type)
+            period_label = cast(Optional[str], doc.period_label)
+            filename = cast(Optional[str], doc.filename)
+            title = cast(Optional[str], getattr(doc, "title", None))
+
+            meta_parts: List[str] = []
+            if doc_type:
+                meta_parts.append(doc_type)
+            if period_label:
+                meta_parts.append(period_label)
+            meta = " / ".join(meta_parts) if meta_parts else ""
+            resolved_title = title or filename or "辟｡鬘・
+            suffix = f"・・meta}・・ if meta else ""
+            lines.append(f"- {resolved_title}{suffix}")
+        pieces.append("\n".join(lines))
+
+    return pieces
+
+
+def _build_fallback_response(conversation: Conversation) -> ChatTurnResponse:
+    """LLM 螟ｱ謨玲凾縺ｮ繝輔か繝ｼ繝ｫ繝舌ャ繧ｯ繝ｬ繧ｹ繝昴Φ繧ｹ繧堤函謌舌☆繧九・""
+    current_step_value = conversation.step or 0
+    try:
+        current_step_int = int(current_step_value)
+    except (TypeError, ValueError):
+        current_step_int = 0
+
+    return ChatTurnResponse(
+        conversation_id=conversation.id,
+        reply=FALLBACK_REPLY,
+        question="",
+        options=[],
+        allow_free_text=True,
+        step=current_step_int,
+        done=current_step_int >= 5,
+    )
+
+
+async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResponse:
+    t_total_start = time.perf_counter()
+    if not payload.message and not payload.selected_option_id and not payload.selection and not payload.messages:
+        raise HTTPException(status_code=400, detail="繝｡繝・そ繝ｼ繧ｸ縺ｾ縺溘・驕ｸ謚櫁い繧帝∽ｿ｡縺励※縺上□縺輔＞")
+
+    user = _ensure_user(db, payload.user_id or "demo-user")
+    conversation = _get_or_create_conversation(db, payload.conversation_id, user, payload.category)
+
+    history: List[Message] = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at.asc())
+        .all()
+    )
+
+    selection = payload.selection
+    choice_id = None
+    choice_label = None
+    free_text = payload.message
+
+    if selection:
+        if selection.type == "choice":
+            choice_id = selection.id
+            choice_label = selection.label
+        elif selection.type == "free_text":
+            free_text = selection.text or payload.message
+
+    if not selection:
+        choice_id = payload.selected_option_id
+        if not free_text and payload.messages:
+            # use last user message from messages array
+            for m in reversed(payload.messages):
+                if m.role == "user" and m.content:
+                    free_text = m.content
+                    break
+
+    if not free_text and not choice_label and not choice_id:
+        raise HTTPException(status_code=400, detail="蜈･蜉帙′遨ｺ縺ｧ縺吶ゅΓ繝・そ繝ｼ繧ｸ縺ｾ縺溘・驕ｸ謚櫁い繧帝∽ｿ｡縺励※縺上□縺輔＞")
+
+    option_label = choice_label or (choice_id and _find_option_label(history, choice_id))
+    display_text = free_text or option_label or choice_id or ""
+
+    user_entries: List[str] = []
+    if choice_id:
+        user_entries.append(f"[choice_id:{choice_id}] {display_text}")
+    elif display_text:
+        user_entries.append(display_text.strip())
+
+    for text in user_entries:
+        saved = _persist_message(db, conversation, "user", text)
+        history.append(saved)
+
+    if not conversation.main_concern and user_entries:
+        conversation.main_concern = user_entries[0][:255]
+
+    query_text = free_text or option_label or conversation.main_concern or (payload.category or "邨悟霧縺ｫ髢｢縺吶ｋ逶ｸ隲・)
+    # augment query with domain hints to hit relevant chapters
+    extra_terms: List[str] = []
+    text_for_hint = (display_text or "") + " " + (choice_label or "") + " " + (payload.category or "")
+    if any(k in text_for_hint for k in ["螢ｲ荳・, "雋ｩ螢ｲ", "髴隕・, "萓｡譬ｼ", "雋ｩ霍ｯ"]):
+        extra_terms.extend(["螢ｲ荳・, "髴隕・, "萓｡譬ｼ霆｢雖・, "莉伜刈萓｡蛟､", "雋ｩ霍ｯ"])
+    if any(k in text_for_hint for k in ["謗｡逕ｨ", "莠ｺ譚・, "莠ｺ謇・, "莠ｺ譚蝉ｸ崎ｶｳ"]):
+        extra_terms.extend(["莠ｺ謇倶ｸ崎ｶｳ", "雉・ｸ翫￡", "逵∝鴨蛹・, "螟夜Κ莠ｺ譚・, "繝・ず繧ｿ繝ｫ蛹・])
+    if any(k in text_for_hint for k in ["雉・≡", "雉・≡郢ｰ繧・, "繧ｭ繝｣繝・す繝･", "蛟溷・"]):
+        extra_terms.extend(["雉・≡郢ｰ繧・, "繧ｭ繝｣繝・す繝･繝輔Ο繝ｼ", "蛟溷・", "霑疲ｸ・, "陬懷勧驥・])
+    if extra_terms:
+        query_text = f"{query_text} " + " ".join(extra_terms)
+
+    t_system_start = time.perf_counter()
+    system_prompt = SYSTEM_PROMPT
+    t_system_ms = (time.perf_counter() - t_system_start) * 1000
+
+    t_rag_start = time.perf_counter()
+    try:
+        rag_chunks = await rag_service.retrieve_context(
+            db=db,
+            user_id=cast(Optional[str], user.id) if user else None,
+            company_id=payload.company_id,
+            query=query_text,
+            top_k=5,
+        )
+    except Exception:
+        logger.exception("failed to retrieve RAG context")
+        rag_chunks = []
+    t_rag_ms = (time.perf_counter() - t_rag_start) * 1000
+
+    structured_chunks = _collect_structured_context(db, user, conversation)
+    all_chunks: List[str] = []
+    if rag_chunks:
+        all_chunks.extend(rag_chunks)
+    if structured_chunks:
+        all_chunks.extend(structured_chunks)
+
+    # knowledge search
+    t_kn_start = time.perf_counter()
+    citations: List[Citation] = []
+    try:
+        knowledge_hits = await search_knowledge(query_text, top_k=5)
+        keywords = [k for k in ["螢ｲ荳・, "髴隕・, "萓｡譬ｼ", "雋ｩ霍ｯ", "謗｡逕ｨ", "莠ｺ譚・, "莠ｺ謇・, "莠ｺ譚蝉ｸ崎ｶｳ", "雉・≡", "雉・≡郢ｰ繧・, "繧ｭ繝｣繝・す繝･", "雉・ｸ翫￡", "逵∝鴨蛹・, "螟夜Κ莠ｺ譚・, "繝・ず繧ｿ繝ｫ"] if k in query_text]
+        filtered_hits = [
+            h
+            for h in knowledge_hits
+            if any(
+                kw in (h.get("snippet") or "") or kw in (h.get("source_title") or "")
+                for kw in keywords
+            )
+        ] if keywords else []
+        hits_for_use = filtered_hits or knowledge_hits
+        for idx, hit in enumerate(hits_for_use, 1):
+            txt = hit.get("snippet") or hit.get("text") or ""
+            title = hit.get("source_title") or ""
+            page = hit.get("page")
+            path = hit.get("source_path")
+            score = hit.get("score")
+            excerpt = txt if len(txt) <= 400 else txt[:400] + "..."
+            all_chunks.append(f"[蜿りボidx}] {title} p.{page or '?'}\n{excerpt}")
+            citations.append(
+                Citation(
+                    title=title,
+                    page=page,
+                    path=path,
+                    score=score,
+                    snippet=txt,
+                )
+            )
+        if hits_for_use:
+            logger.info("[knowledge] candidates=%s top_score=%s", len(hits_for_use), hits_for_use[0].get("score"))
+    except Exception:
+        logger.exception("knowledge search failed")
+    t_kn_ms = (time.perf_counter() - t_kn_start) * 1000
+
+    if all_chunks:
+        context_text = "\n\n".join(all_chunks)
+    else:
+        context_text = (
+            "莨夂､ｾ諠・ｱ繧・ｨ倬鹸縺ｯ縺ｾ縺蜊∝・縺ｫ逋ｻ骭ｲ縺輔ｌ縺ｦ縺・∪縺帙ｓ縲ゅ◎繧後〒繧ゅΘ繝ｼ繧ｶ繝ｼ縺ｮ蜈･蜉帛・螳ｹ繧偵ｂ縺ｨ縺ｫ縲・
+            "荳ｭ蟆丈ｼ∵･ｭ縺ｮ邨悟霧逶ｸ隲・→縺励※荳∝ｯｧ縺ｫ繝偵い繝ｪ繝ｳ繧ｰ繧帝ｲ繧√※縺上□縺輔＞縲・
+        )
+
+    history_text = _history_as_text(history)
+    user_prompt_text = (
+        "莉･荳九・縲√％縺ｮ莨夂､ｾ縺ｫ髢｢縺吶ｋ驕主悉縺ｮ逶ｸ隲・Γ繝｢繝ｻ繝√Ε繝・ヨ繝ｻ雉・侭縺ｮ謚懃ｲ九〒縺吶・n"
+        "縺薙ｌ繧峨ｒ蜿ら・縺励↑縺後ｉ縲√Θ繝ｼ繧ｶ繝ｼ縺ｮ迴ｾ蝨ｨ縺ｮ雉ｪ蝠上↓譌･譛ｬ隱槭〒蝗樒ｭ斐＠縺ｦ縺上□縺輔＞縲・n\n"
+        "# 繧ｳ繝ｳ繝・く繧ｹ繝・n"
+        f"{context_text}\n\n"
+        "# 縺薙ｌ縺ｾ縺ｧ縺ｮ莨夊ｩｱ縺ｮ豬√ｌ\n"
+        f"{history_text}\n\n"
+        "# 繝ｦ繝ｼ繧ｶ繝ｼ縺ｮ雉ｪ蝠十n"
+        f"{query_text}"
+    )
+
+    messages: List[ChatMessage] = [
+        cast(ChatMessage, {"role": "system", "content": system_prompt}),
+        cast(ChatMessage, {"role": "user", "content": user_prompt_text}),
+    ]
+
+    prior_step_value = conversation.step or 0
+    try:
+        prior_step_int = int(prior_step_value)
+    except (TypeError, ValueError):
+        prior_step_int = 0
+
+    used_fallback = False
+    t_llm_start = time.perf_counter()
+    try:
+        llm_result = await chat_json_safe("LLM-CHAT-01-v1", messages, max_tokens=400, temperature=0.25)
+        if not llm_result.ok or not isinstance(llm_result.value, dict):
+            logger.warning("guided chat: LLM failed (%s)", llm_result.error)
+            used_fallback = True
+            result = _build_fallback_response(conversation)
+        else:
+            raw = dict(llm_result.value)
+            raw.setdefault("options", [])
+            raw.setdefault("allow_free_text", True)
+            raw["citations"] = [c.model_dump() for c in citations] if citations else []
+
+            raw.pop("conversation_id", None)
+            raw.pop("step", None)
+
+            next_step = prior_step_int + 1
+            if next_step > 5:
+                next_step = 5
+
+            raw["step"] = next_step
+            raw["done"] = next_step >= 5
+
+            result = ChatTurnResponse(conversation_id=conversation.id, **raw)
+    except AzureNotConfiguredError:
+        logger.exception("Azure OpenAI is not configured; using fallback response")
+        used_fallback = True
+        result = _build_fallback_response(conversation)
+    except HTTPException:
+        logger.exception("HTTPException from LLM client; using fallback response")
+        used_fallback = True
+        result = _build_fallback_response(conversation)
+    except Exception:
+        logger.exception("guided chat generation failed; using fallback response")
+        used_fallback = True
+        result = _build_fallback_response(conversation)
+    t_llm_ms = (time.perf_counter() - t_llm_start) * 1000
+
+    result.citations = citations
+    t_total_ms = (time.perf_counter() - t_total_start) * 1000
+    logger.info(
+        "PERF guided t_total=%.1fms t_system=%.1fms t_rag=%.1fms t_knowledge=%.1fms t_llm=%.1fms citations=%s",
+        t_total_ms,
+        t_system_ms,
+        t_rag_ms,
+        t_kn_ms,
+        t_llm_ms,
+        len(citations),
+    )
+
+    conversation.step = prior_step_int if used_fallback else result.step
+    conversation.status = (
+        ConversationStatus.COMPLETED.value if result.done else ConversationStatus.IN_PROGRESS.value
+    )
+    if result.done:
+        conversation.ended_at = datetime.utcnow()
+    db.add(conversation)
+    db.commit()
+
+    if not used_fallback:
+        assistant_payload = result.model_dump()
+        assistant_payload["conversation_id"] = conversation.id
+        _persist_message(db, conversation, "assistant", json.dumps(assistant_payload, ensure_ascii=False))
+
+    return result
+
+

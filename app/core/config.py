@@ -49,10 +49,37 @@ class Settings(BaseSettings):
         default="2024-02-15-preview",
         validation_alias=AliasChoices("AZURE_OPENAI_API_VERSION"),
     )
+    azure_openai_embedding_deployment: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "AZURE_OPENAI_EMBEDDING_MODEL"),
+    )
+    azure_openai_embed_deployment: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AZURE_OPENAI_EMBED_DEPLOYMENT", "AZURE_OPENAI_EMBED_MODEL"),
+    )
     rag_persist_dir: str = Field(default="./rag_store", validation_alias=AliasChoices("RAG_PERSIST_DIR"))
     rag_enabled: bool = Field(default=True, validation_alias=AliasChoices("ENABLE_RAG"))
+    cosmos_mongo_uri: str | None = Field(default=None, validation_alias=AliasChoices("COSMOS_MONGO_URI"))
+    cosmos_db_name: str | None = Field(default=None, validation_alias=AliasChoices("COSMOS_DB_NAME"))
+    cases_collection: str | None = Field(default=None, validation_alias=AliasChoices("CASES_COLLECTION"))
+    knowledge_collection: str = Field(
+        default="knowledge_chunks", validation_alias=AliasChoices("KNOWLEDGE_COLLECTION")
+    )
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @property
+    def azure_embedding_deployment(self) -> str | None:
+        """
+        Resolve the embedding deployment name with priority:
+        1) AZURE_OPENAI_EMBEDDING_DEPLOYMENT (primary, .env existing key)
+        2) AZURE_OPENAI_EMBED_DEPLOYMENT (legacy/compat)
+        """
+        if self.azure_openai_embedding_deployment:
+            return self.azure_openai_embedding_deployment
+        if self.azure_openai_embed_deployment:
+            return self.azure_openai_embed_deployment
+        return None
 
 
 def get_db_url(settings: "Settings") -> str:
