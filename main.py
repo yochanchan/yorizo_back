@@ -21,6 +21,7 @@ from app.api import (
     rag,
     report,
     reports,
+    speech,
 )
 from database import Base, engine
 import models  # noqa: F401
@@ -141,6 +142,7 @@ app.include_router(report.router, prefix="/api", tags=["report"])
 app.include_router(reports.router, prefix="/api", tags=["reports"])
 app.include_router(admin_bookings.router, prefix="/api", tags=["admin"])
 app.include_router(case_examples.router, prefix="/api", tags=["case-examples"])
+app.include_router(speech.router)
 
 
 @app.get("/health")

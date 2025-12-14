@@ -49,6 +49,8 @@ class Settings(BaseSettings):
         default="2024-02-15-preview",
         validation_alias=AliasChoices("AZURE_OPENAI_API_VERSION"),
     )
+    azure_speech_key: str | None = Field(default=None, validation_alias=AliasChoices("AZURE_SPEECH_KEY"))
+    azure_speech_region: str | None = Field(default=None, validation_alias=AliasChoices("AZURE_SPEECH_REGION"))
     rag_persist_dir: str = Field(default="./rag_store", validation_alias=AliasChoices("RAG_PERSIST_DIR"))
     rag_enabled: bool = Field(default=True, validation_alias=AliasChoices("ENABLE_RAG"))
 
