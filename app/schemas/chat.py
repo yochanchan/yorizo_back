@@ -15,6 +15,10 @@ class GuidedUserSelection(BaseModel):
     label: Optional[str] = Field(None, description="Display label (Japanese) for the choice")
     text: Optional[str] = Field(None, description="Free text when type is free_text")
 
+class ChatMessageInput(BaseModel):
+    role: Literal["user", "assistant", "system"]
+    content: str
+
 
 class ChatTurnRequest(BaseModel):
     conversation_id: Optional[str] = None
@@ -23,7 +27,18 @@ class ChatTurnRequest(BaseModel):
     selection: Optional[GuidedUserSelection] = None
     message: Optional[str] = Field(None, description="Free text input from the user (legacy)")
     selected_option_id: Optional[str] = Field(None, description="Option chosen by the user (legacy)")
+    messages: Optional[List[ChatMessageInput]] = Field(
+        None, description="Alternative input: array of chat messages (last user is used)"
+    )
     category: Optional[str] = Field(None, description="High-level topic: sales/cash/hr/ops/other")
+
+
+class Citation(BaseModel):
+    title: str
+    path: Optional[str] = None
+    page: Optional[int] = None
+    score: Optional[float] = None
+    snippet: Optional[str] = None
 
 
 class ChatTurnResponse(BaseModel):
@@ -34,3 +49,4 @@ class ChatTurnResponse(BaseModel):
     allow_free_text: bool = True
     step: int = 1
     done: bool = False
+    citations: List[Citation] = Field(default_factory=list)

@@ -25,6 +25,7 @@ from app.api import (
 from database import Base, engine
 import models  # noqa: F401
 from seed import seed_demo_data
+from app.core.utf8_json_response import UTF8JSONResponse
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ cors_origins = os.getenv("CORS_ORIGINS")
 env_origins = [origin.strip() for origin in cors_origins.split(",") if origin.strip()] if cors_origins else []
 origins = list({*default_origins, *env_origins})
 
-app = FastAPI(title="Yorizo API", version="0.1.0")
+app = FastAPI(title="Yorizo API", version="0.1.0", default_response_class=UTF8JSONResponse)
 
 
 def _ensure_sqlite_columns() -> None:

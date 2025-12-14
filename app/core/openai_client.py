@@ -48,11 +48,7 @@ class LlmResult(Generic[T]):
 
 # Azure chat client (required for chat completions)
 azure_client: AzureOpenAI | None = None
-if (
-    settings.azure_openai_endpoint
-    and settings.azure_openai_api_key
-    and settings.azure_openai_chat_deployment
-):
+if settings.azure_openai_endpoint and settings.azure_openai_api_key:
     azure_client = AzureOpenAI(
         api_key=settings.azure_openai_api_key,
         api_version=settings.azure_openai_api_version,
@@ -188,11 +184,20 @@ async def embed_texts(texts: Union[str, List[str]]) -> List[List[float]]:
     if not input_texts:
         return []
 
-    client = get_client()
-    model_name = getattr(settings, "openai_model_embedding", DEFAULT_EMBEDDING_MODEL) or DEFAULT_EMBEDDING_MODEL
+    embed_model = settings.azure_embedding_deployment or getattr(settings, "openai_model_embedding", DEFAULT_EMBEDDING_MODEL) or DEFAULT_EMBEDDING_MODEL
 
+    if settings.azure_openai_endpoint and settings.azure_openai_api_key and azure_client:
+        logger.info("Using Azure embedding deployment: %s", embed_model)
+        resp = azure_client.embeddings.create(
+            model=embed_model,
+            input=input_texts,
+        )
+        return [item.embedding for item in resp.data]
+
+    client = get_client()
+    logger.info("Using OpenAI embedding model: %s", embed_model)
     resp = client.embeddings.create(
-        model=model_name,
+        model=embed_model,
         input=input_texts,
     )
     if inspect.isawaitable(resp):

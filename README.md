@@ -29,6 +29,18 @@ Remove-Item .\yorizo.db -ErrorAction SilentlyContinue  # Windows PowerShell
 alembic upgrade head
 uvicorn main:app --reload --port 8000
 ```
+
+## Official PDF knowledge (RAG)
+- PDFファイルはリポジトリに含めず、`backend/data/pdfs/` などローカルに置く（.gitignore 済み）。
+- Cosmos に投入するには、事前に .env で `COSMOS_MONGO_URI` / `COSMOS_DB_NAME` を設定し、必要に応じて `KNOWLEDGE_COLLECTION` を指定。
+- 少量テスト例:
+  ```bash
+  cd backend
+  set PDF_LIMIT=2
+  set PAGE_LIMIT=5
+  set CHUNK_LIMIT=30
+  python scripts/ingest_official_pdfs_with_embed.py ./data/pdfs
+  ```
 macOS/Linux の場合は `rm ./yorizo.db` を使ってください。
 
 ### RAG 動作確認手順
