@@ -11,6 +11,7 @@ from app.api import (
     chat,
     company_profile,
     company_reports,
+    consultations,
     conversations,
     diagnosis,
     documents,
@@ -129,6 +130,7 @@ app.include_router(chat.router)
 app.include_router(conversations.router, prefix="/api", tags=["conversations"])
 app.include_router(company_profile.router, prefix="/api", tags=["company-profile"])
 app.include_router(company_reports.router, prefix="/api", tags=["companies"])
+app.include_router(consultations.router, prefix="/api", tags=["consultations"])
 app.include_router(diagnosis.router, prefix="/api", tags=["diagnosis"])
 app.include_router(memory.router, prefix="/api", tags=["memory"])
 app.include_router(rag.router, prefix="/api", tags=["rag"])
