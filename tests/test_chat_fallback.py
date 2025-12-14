@@ -99,7 +99,7 @@ def test_chat_fallback_keeps_response_shape(client_base: TestClient, monkeypatch
     assert resp.status_code == 200, resp.text
     data = resp.json()
 
-    assert set(data.keys()) == {
+    required = {
         "conversation_id",
         "reply",
         "question",
@@ -108,6 +108,11 @@ def test_chat_fallback_keeps_response_shape(client_base: TestClient, monkeypatch
         "step",
         "done",
     }
+    assert required.issubset(data.keys())
+
+    # citations is optional; if present, ensure it is a list
+    if "citations" in data:
+        assert isinstance(data["citations"], list)
 
     assert FALLBACK_SNIPPET in data["reply"]
     assert data["done"] is False
