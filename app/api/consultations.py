@@ -13,6 +13,7 @@ from app.schemas.consultation import (
 )
 from database import get_db
 from app.models import ConsultationBooking, ConsultationMemo, Conversation, Expert
+from app.services import booking_rules
 
 router = APIRouter()
 
@@ -37,7 +38,7 @@ async def list_consultations(
     db: Session = Depends(get_db),
 ) -> ConsultationBookingListResponse:
     """List upcoming consultation bookings for a user."""
-    date_filter = date_from or date.today()
+    date_filter = date_from or booking_rules.get_jst_today()
     query = (
         db.query(ConsultationBooking, Expert.name.label("expert_name"))
         .join(Expert, ConsultationBooking.expert_id == Expert.id)

@@ -4,6 +4,14 @@ from datetime import date, datetime, timedelta
 
 import jpholiday
 
+# Default consultation slots (MVP fixed)
+DEFAULT_SLOTS = [
+    "10:00-11:00",
+    "11:00-12:00",
+    "14:00-15:00",
+    "15:00-16:00",
+]
+
 # Additional closure dates (MVP固定)
 EXTRA_CLOSED_DATES = {
     date(2025, 12, 29),
@@ -36,4 +44,3 @@ def is_closed_day(target: date) -> bool:
 def is_within_booking_window(target: date, today: date | None = None) -> bool:
     start, end = booking_window(today)
     return start <= target <= end
-

@@ -1,7 +1,6 @@
-import json
 import os
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -47,7 +46,7 @@ def client_base() -> TestClient:
     return TestClient(app)
 
 
-def _setup_expert_with_availability():
+def _setup_expert():
     db = database.SessionLocal()
     try:
         expert = models.Expert(name="Test Expert")
@@ -55,16 +54,6 @@ def _setup_expert_with_availability():
         db.commit()
         db.refresh(expert)
         return expert.id
-    finally:
-        db.close()
-
-
-def _add_availability(expert_id: str, availability: list[tuple[date, list[str]]]):
-    db = database.SessionLocal()
-    try:
-        for dt, slots in availability:
-            db.add(models.ExpertAvailability(expert_id=expert_id, date=dt, slots_json=json.dumps(slots)))
-        db.commit()
     finally:
         db.close()
 
@@ -88,43 +77,45 @@ def _add_booking(expert_id: str, booking_date: date, time_slot: str, status: str
         db.close()
 
 
-def test_availability_filters_closed_days_and_counts(monkeypatch, client_base: TestClient):
+def test_availability_uses_default_slots_and_ignores_old_slots(monkeypatch, client_base: TestClient):
     base_today = date(2025, 12, 24)
     monkeypatch.setattr(booking_rules, "get_jst_today", lambda: base_today)
 
-    expert_id = _setup_expert_with_availability()
-    _add_availability(
-        expert_id,
-        [
-            (date(2025, 12, 25), ["10:00", "13:00"]),
-            (date(2025, 12, 26), ["09:00"]),
-            (date(2025, 12, 27), ["10:00"]),  # weekend
-            (date(2025, 12, 29), ["15:00"]),  # additional closure
-            (date(2026, 1, 1), ["09:00"]),  # holiday
-            (date(2026, 1, 5), ["10:00", "11:00"]),
-            (date(2026, 1, 22), ["10:00"]),  # outside window
-        ],
-    )
-    _add_booking(expert_id, date(2025, 12, 25), "13:00", status="confirmed")
-    _add_booking(expert_id, date(2025, 12, 26), "09:00")
-    _add_booking(expert_id, date(2026, 1, 5), "10:00")
+    expert_id = _setup_expert()
+
+    first_open = base_today + timedelta(days=1)  # 2025-12-25
+    second_open = base_today + timedelta(days=2)  # 2025-12-26
+    weekend = base_today + timedelta(days=3)  # 2025-12-27 (excluded)
+    extra_closed = date(2025, 12, 29)
+    new_year = date(2026, 1, 1)
+
+    _add_booking(expert_id, first_open, "10:00-11:00", status="confirmed")
+    _add_booking(expert_id, first_open, "16:00-17:00", status="pending")  # should be ignored
+    _add_booking(expert_id, second_open, "11:00-12:00", status="cancelled")  # cancelled should free the slot
+    _add_booking(expert_id, weekend, "14:00-15:00", status="pending")  # excluded by closed day rule
 
     resp = client_base.get(f"/api/experts/{expert_id}/availability")
 
     assert resp.status_code == 200, resp.text
     data = resp.json()
     availability = data.get("availability", [])
-    dates = [item["date"] for item in availability]
-    assert dates == ["2025-12-25", "2025-12-26", "2026-01-05"]
+    assert availability, "availability should not be empty within the window"
 
-    day_25 = next(item for item in availability if item["date"] == "2025-12-25")
-    assert day_25["booked_slots"] == ["13:00"]
-    assert day_25["available_count"] == 1
+    # All days share the same default slots and expose booked_slots/available_count
+    assert all(item["slots"] == booking_rules.DEFAULT_SLOTS for item in availability)
+    assert all("booked_slots" in item and "available_count" in item for item in availability)
 
-    day_26 = next(item for item in availability if item["date"] == "2025-12-26")
-    assert day_26["booked_slots"] == ["09:00"]
-    assert day_26["available_count"] == 0
+    dates = {item["date"] for item in availability}
+    assert first_open.isoformat() in dates
+    assert second_open.isoformat() in dates
+    assert weekend.isoformat() not in dates
+    assert extra_closed.isoformat() not in dates
+    assert new_year.isoformat() not in dates
 
-    day_105 = next(item for item in availability if item["date"] == "2026-01-05")
-    assert day_105["booked_slots"] == ["10:00"]
-    assert day_105["available_count"] == 1
+    day1 = next(item for item in availability if item["date"] == first_open.isoformat())
+    assert day1["booked_slots"] == ["10:00-11:00"]
+    assert day1["available_count"] == len(booking_rules.DEFAULT_SLOTS) - 1
+
+    day2 = next(item for item in availability if item["date"] == second_open.isoformat())
+    assert day2["booked_slots"] == []
+    assert day2["available_count"] == len(booking_rules.DEFAULT_SLOTS)
