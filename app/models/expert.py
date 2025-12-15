@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Column, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Column, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from database import Base
@@ -39,6 +39,9 @@ class ExpertAvailability(Base):
 
 class ConsultationBooking(Base):
     __tablename__ = "consultation_bookings"
+    __table_args__ = (
+        UniqueConstraint("expert_id", "date", "time_slot", name="uq_consultation_booking_slot"),
+    )
 
     id = Column(GUID_TYPE, primary_key=True, default=default_uuid)
     expert_id = Column(GUID_TYPE, ForeignKey("experts.id"), nullable=False)

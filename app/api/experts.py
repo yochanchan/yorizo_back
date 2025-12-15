@@ -1,9 +1,11 @@
-from datetime import date, datetime, timedelta
+from collections import defaultdict
+from datetime import datetime, timedelta
 import json
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.schemas.expert import (
     ConsultationBookingRequest,
@@ -13,6 +15,8 @@ from app.schemas.expert import (
 )
 from database import get_db
 from app.models import ConsultationBooking, Conversation, Expert, ExpertAvailability, User
+from app.models.enums import BookingStatus
+from app.services import booking_rules
 
 router = APIRouter()
 
@@ -46,8 +50,15 @@ def _seed_experts_if_needed(db: Session) -> None:
     db.add_all([expert1, expert2])
     db.commit()
 
-    today = date.today()
-    sample_dates = [today + timedelta(days=i) for i in range(1, 8)]
+    start, end = booking_rules.booking_window()
+    sample_dates: List = []
+    current = start
+    while current <= end and len(sample_dates) < 10:
+        if not booking_rules.is_closed_day(current):
+            sample_dates.append(current)
+        current += timedelta(days=1)
+    if not sample_dates:
+        sample_dates.append(start)
     slots = json.dumps(["10:00-11:00", "11:00-12:00", "14:00-15:00", "16:00-17:00"], ensure_ascii=False)
     for exp in [expert1, expert2]:
         for d in sample_dates:
@@ -103,8 +114,13 @@ async def get_expert_availability(expert_id: str, db: Session = Depends(get_db))
     )
 
     if not availabilities:
-        today = date.today()
-        sample_dates = [today + timedelta(days=i) for i in range(1, 8)]
+        start, end = booking_rules.booking_window()
+        sample_dates: List = []
+        current = start
+        while current <= end and len(sample_dates) < 10:
+            if not booking_rules.is_closed_day(current):
+                sample_dates.append(current)
+            current += timedelta(days=1)
         slots = json.dumps(["10:00-11:00", "11:00-12:00", "14:00-15:00", "16:00-17:00"], ensure_ascii=False)
         for d in sample_dates:
             db.add(ExpertAvailability(expert_id=expert_id, date=d, slots_json=slots))
@@ -116,10 +132,42 @@ async def get_expert_availability(expert_id: str, db: Session = Depends(get_db))
             .all()
         )
 
-    availability = [
-        {"date": item.date, "slots": json.loads(item.slots_json) if item.slots_json else []} for item in availabilities
-    ]
-    return ExpertAvailabilityResponse(expert_id=expert_id, availability=availability)
+    start_date, end_date = booking_rules.booking_window()
+    bookings = (
+        db.query(ConsultationBooking)
+        .filter(
+            ConsultationBooking.expert_id == expert_id,
+            ConsultationBooking.date >= start_date,
+            ConsultationBooking.date <= end_date,
+            ConsultationBooking.status != BookingStatus.CANCELLED.value,
+        )
+        .all()
+    )
+    booked_by_date: dict = defaultdict(set)
+    for booking in bookings:
+        booked_by_date[booking.date].add(booking.time_slot)
+
+    availability_items = []
+    for item in availabilities:
+        if item.date < start_date or item.date > end_date:
+            continue
+        if booking_rules.is_closed_day(item.date):
+            continue
+        slots = json.loads(item.slots_json) if item.slots_json else []
+        if not slots:
+            continue
+        booked_slots = [slot for slot in slots if slot in booked_by_date.get(item.date, set())]
+        available_count = len([slot for slot in slots if slot not in booked_by_date.get(item.date, set())])
+        availability_items.append(
+            {
+                "date": item.date,
+                "slots": slots,
+                "booked_slots": booked_slots,
+                "available_count": available_count,
+            }
+        )
+
+    return ExpertAvailabilityResponse(expert_id=expert_id, availability=availability_items)
 
 
 @router.post("/consultations", response_model=ConsultationBookingResponse)
@@ -130,13 +178,19 @@ async def create_consultation_booking(
     if not expert:
         raise HTTPException(status_code=404, detail="Expert not found")
 
+    today = booking_rules.get_jst_today()
+    if not booking_rules.is_within_booking_window(payload.date, today) or booking_rules.is_closed_day(payload.date):
+        raise HTTPException(status_code=400, detail="Booking date is not available")
+
     availability = (
         db.query(ExpertAvailability)
         .filter(ExpertAvailability.expert_id == payload.expert_id, ExpertAvailability.date == payload.date)
         .first()
     )
     valid_slots = json.loads(availability.slots_json) if availability and availability.slots_json else []
-    if valid_slots and payload.time_slot not in valid_slots:
+    if not valid_slots:
+        raise HTTPException(status_code=400, detail="Selected date is not available")
+    if payload.time_slot not in valid_slots:
         raise HTTPException(status_code=400, detail="Selected time slot is not available")
 
     conversation = None
@@ -158,6 +212,19 @@ async def create_consultation_booking(
             db.add(user)
             db.commit()
 
+    existing = (
+        db.query(ConsultationBooking)
+        .filter(
+            ConsultationBooking.expert_id == payload.expert_id,
+            ConsultationBooking.date == payload.date,
+            ConsultationBooking.time_slot == payload.time_slot,
+            ConsultationBooking.status != BookingStatus.CANCELLED.value,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="Selected time slot is already booked")
+
     booking = ConsultationBooking(
         expert_id=payload.expert_id,
         user_id=user.id if user else None,
@@ -174,7 +241,11 @@ async def create_consultation_booking(
         created_at=datetime.utcnow(),
     )
     db.add(booking)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Selected time slot is already booked")
     db.refresh(booking)
 
     return ConsultationBookingResponse(
