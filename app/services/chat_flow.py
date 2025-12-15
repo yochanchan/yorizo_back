@@ -14,6 +14,7 @@ from app.models import CompanyProfile, Conversation, Document, Memory, Message, 
 from app.models.enums import ConversationStatus
 from app.schemas.chat import ChatTurnRequest, ChatTurnResponse, Citation
 from app.services import rag as rag_service
+from app.services.example_answer import build_examples_answer
 from app.schemas.chat import ChatMessageInput
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ SYSTEM_PROMPT = """
 """.strip()
 
 FALLBACK_REPLY = "Yorizo が考えるのに失敗しました。管理者にお問い合わせください。"
+CASE_KEYWORDS = ["事例", "成功例", "参考例", "ケース", "取り組み"]
 
 def _ensure_user(db: Session, user_id: Optional[str]) -> Optional[User]:
     if not user_id:
@@ -283,6 +285,8 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
 
     option_label = choice_label or (choice_id and _find_option_label(history, choice_id))
     display_text = free_text or option_label or choice_id or ""
+    case_query_text = display_text or ""
+    is_case_query = any(keyword in case_query_text for keyword in CASE_KEYWORDS)
 
     user_entries: List[str] = []
     if choice_id:
@@ -331,8 +335,10 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
 
     # knowledge search
     citations: List[Citation] = []
+    hits_payload: List[dict] = []
+    hits_for_examples: List[dict] = []
     try:
-        knowledge_hits = await search_knowledge(query_text, top_k=5)
+        knowledge_hits = await search_knowledge(query_text, top_k=8)
         keywords = [k for k in ["売上", "需要", "価格", "販路", "採用", "人材", "人手", "人材不足", "資金", "資金繰り", "キャッシュ", "賃上げ", "省力化", "外部人材", "デジタル"] if k in query_text]
         filtered_hits = [
             h
@@ -342,7 +348,8 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
                 for kw in keywords
             )
         ] if keywords else []
-        hits_for_use = filtered_hits or knowledge_hits
+        hits_for_use = (filtered_hits or knowledge_hits)[:8]
+        hits_for_examples = hits_for_use
         for idx, hit in enumerate(hits_for_use, 1):
             txt = hit.get("snippet") or hit.get("text") or ""
             title = hit.get("source_title") or ""
@@ -360,10 +367,27 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
                     snippet=txt,
                 )
             )
+            hits_payload.append(
+                {
+                    "title": title or (hit.get("title") or hit.get("source_path") or ""),
+                    "path": path,
+                    "page": page,
+                    "score": score,
+                    "snippet": txt,
+                }
+            )
         if hits_for_use:
             logger.info("[knowledge] candidates=%s top_score=%s", len(hits_for_use), hits_for_use[0].get("score"))
     except Exception:
         logger.exception("knowledge search failed")
+
+    case_answer: Optional[str] = None
+    if is_case_query:
+        try:
+            case_answer = build_examples_answer(case_query_text or query_text, hits_for_examples)
+        except Exception:
+            logger.exception("failed to build case-style answer")
+            case_answer = "現在混雑しています。もう一度お試しください。"
 
     if all_chunks:
         context_text = "\n\n".join(all_chunks)
@@ -434,6 +458,9 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
         result = _build_fallback_response(conversation)
 
     result.citations = citations
+    result.hits = hits_payload
+    if case_answer is not None:
+        result.answer = case_answer
     logger.info("[guided] citations_len=%s", len(citations))
 
     conversation.step = prior_step_int if used_fallback else result.step

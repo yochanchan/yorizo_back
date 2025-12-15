@@ -41,6 +41,14 @@ class Citation(BaseModel):
     snippet: Optional[str] = None
 
 
+class KnowledgeHit(BaseModel):
+    title: str
+    path: Optional[str] = None
+    page: Optional[int] = None
+    score: Optional[float] = None
+    snippet: Optional[str] = None
+
+
 class ChatTurnResponse(BaseModel):
     conversation_id: str
     reply: str
@@ -50,3 +58,5 @@ class ChatTurnResponse(BaseModel):
     step: int = 1
     done: bool = False
     citations: List[Citation] = Field(default_factory=list)
+    answer: Optional[str] = Field(None, description="Formatted case examples answer when requested")
+    hits: List[KnowledgeHit] = Field(default_factory=list)

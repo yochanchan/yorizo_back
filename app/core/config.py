@@ -46,7 +46,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AZURE_OPENAI_CHAT_DEPLOYMENT", "AZURE_OPENAI_DEPLOYMENT"),
     )
     azure_openai_api_version: str = Field(
-        default="2024-02-15-preview",
+        default="2024-12-01-preview",
         validation_alias=AliasChoices("AZURE_OPENAI_API_VERSION"),
     )
     azure_openai_embedding_deployment: str | None = Field(
