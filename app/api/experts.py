@@ -1,9 +1,11 @@
-from datetime import date, datetime, timedelta
+from collections import defaultdict
+from datetime import datetime, timedelta
 import json
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.schemas.expert import (
     ConsultationBookingRequest,
@@ -12,9 +14,16 @@ from app.schemas.expert import (
     ExpertResponse,
 )
 from database import get_db
-from app.models import ConsultationBooking, Conversation, Expert, ExpertAvailability, User
+from app.models import ConsultationBooking, Conversation, Expert, User
+from app.models.enums import BookingStatus
+from app.services import booking_rules
 
 router = APIRouter()
+
+# Error messages shared between API and UI
+BOOKING_DATE_ERROR = "予約可能な日程ではありません"
+BOOKING_SLOT_ERROR = "予約可能な時間帯ではありません"
+BOOKING_CONFLICT_ERROR = "この時間枠は既に予約されています。別の枠を選んでください"
 
 
 def _seed_experts_if_needed(db: Session) -> None:
@@ -44,14 +53,6 @@ def _seed_experts_if_needed(db: Session) -> None:
         avatar_url=None,
     )
     db.add_all([expert1, expert2])
-    db.commit()
-
-    today = date.today()
-    sample_dates = [today + timedelta(days=i) for i in range(1, 8)]
-    slots = json.dumps(["10:00-11:00", "11:00-12:00", "14:00-15:00", "16:00-17:00"], ensure_ascii=False)
-    for exp in [expert1, expert2]:
-        for d in sample_dates:
-            db.add(ExpertAvailability(expert_id=exp.id, date=d, slots_json=slots))
     db.commit()
 
 
@@ -95,31 +96,40 @@ async def get_expert_availability(expert_id: str, db: Session = Depends(get_db))
     if not expert:
         raise HTTPException(status_code=404, detail="Expert not found")
 
-    availabilities = (
-        db.query(ExpertAvailability)
-        .filter(ExpertAvailability.expert_id == expert_id)
-        .order_by(ExpertAvailability.date.asc())
+    start_date, end_date = booking_rules.booking_window()
+    bookings = (
+        db.query(ConsultationBooking)
+        .filter(
+            ConsultationBooking.expert_id == expert_id,
+            ConsultationBooking.date >= start_date,
+            ConsultationBooking.date <= end_date,
+            ConsultationBooking.status != BookingStatus.CANCELLED.value,
+        )
         .all()
     )
+    booked_by_date: dict = defaultdict(set)
+    for booking in bookings:
+        if booking.time_slot in booking_rules.DEFAULT_SLOTS:
+            booked_by_date[booking.date].add(booking.time_slot)
 
-    if not availabilities:
-        today = date.today()
-        sample_dates = [today + timedelta(days=i) for i in range(1, 8)]
-        slots = json.dumps(["10:00-11:00", "11:00-12:00", "14:00-15:00", "16:00-17:00"], ensure_ascii=False)
-        for d in sample_dates:
-            db.add(ExpertAvailability(expert_id=expert_id, date=d, slots_json=slots))
-        db.commit()
-        availabilities = (
-            db.query(ExpertAvailability)
-            .filter(ExpertAvailability.expert_id == expert_id)
-            .order_by(ExpertAvailability.date.asc())
-            .all()
-        )
+    availability_items = []
+    current = start_date
+    while current <= end_date:
+        if not booking_rules.is_closed_day(current):
+            slots = list(booking_rules.DEFAULT_SLOTS)
+            booked_slots = [slot for slot in slots if slot in booked_by_date.get(current, set())]
+            available_count = len(slots) - len(booked_slots)
+            availability_items.append(
+                {
+                    "date": current,
+                    "slots": slots,
+                    "booked_slots": booked_slots,
+                    "available_count": available_count,
+                }
+            )
+        current += timedelta(days=1)
 
-    availability = [
-        {"date": item.date, "slots": json.loads(item.slots_json) if item.slots_json else []} for item in availabilities
-    ]
-    return ExpertAvailabilityResponse(expert_id=expert_id, availability=availability)
+    return ExpertAvailabilityResponse(expert_id=expert_id, availability=availability_items)
 
 
 @router.post("/consultations", response_model=ConsultationBookingResponse)
@@ -130,14 +140,12 @@ async def create_consultation_booking(
     if not expert:
         raise HTTPException(status_code=404, detail="Expert not found")
 
-    availability = (
-        db.query(ExpertAvailability)
-        .filter(ExpertAvailability.expert_id == payload.expert_id, ExpertAvailability.date == payload.date)
-        .first()
-    )
-    valid_slots = json.loads(availability.slots_json) if availability and availability.slots_json else []
-    if valid_slots and payload.time_slot not in valid_slots:
-        raise HTTPException(status_code=400, detail="Selected time slot is not available")
+    today = booking_rules.get_jst_today()
+    if not booking_rules.is_within_booking_window(payload.date, today) or booking_rules.is_closed_day(payload.date):
+        raise HTTPException(status_code=400, detail=BOOKING_DATE_ERROR)
+
+    if payload.time_slot not in booking_rules.DEFAULT_SLOTS:
+        raise HTTPException(status_code=400, detail=BOOKING_SLOT_ERROR)
 
     conversation = None
     if payload.conversation_id:
@@ -158,23 +166,53 @@ async def create_consultation_booking(
             db.add(user)
             db.commit()
 
-    booking = ConsultationBooking(
+    existing = (
+        db.query(ConsultationBooking)
+        .filter(
+            ConsultationBooking.expert_id == payload.expert_id,
+            ConsultationBooking.date == payload.date,
+            ConsultationBooking.time_slot == payload.time_slot,
+            ConsultationBooking.status != BookingStatus.CANCELLED.value,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail=BOOKING_CONFLICT_ERROR)
+
+    cancelled_booking = (
+        db.query(ConsultationBooking)
+        .filter(
+            ConsultationBooking.expert_id == payload.expert_id,
+            ConsultationBooking.date == payload.date,
+            ConsultationBooking.time_slot == payload.time_slot,
+            ConsultationBooking.status == BookingStatus.CANCELLED.value,
+        )
+        .first()
+    )
+
+    booking = cancelled_booking or ConsultationBooking(
         expert_id=payload.expert_id,
-        user_id=user.id if user else None,
-        conversation_id=conversation.id if conversation else payload.conversation_id,
         date=payload.date,
         time_slot=payload.time_slot,
-        channel=payload.channel,
-        name=payload.name,
-        phone=payload.phone,
-        email=payload.email,
-        note=payload.note,
-        meeting_url=payload.meeting_url,
-        line_contact=payload.line_contact,
         created_at=datetime.utcnow(),
     )
+    booking.user_id = user.id if user else None
+    booking.conversation_id = conversation.id if conversation else payload.conversation_id
+    booking.channel = payload.channel
+    booking.name = payload.name
+    booking.phone = payload.phone
+    booking.email = payload.email
+    booking.note = payload.note
+    booking.meeting_url = payload.meeting_url
+    booking.line_contact = payload.line_contact
+    booking.status = BookingStatus.PENDING.value
+
     db.add(booking)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=BOOKING_CONFLICT_ERROR)
     db.refresh(booking)
 
     return ConsultationBookingResponse(

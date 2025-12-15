@@ -4,6 +4,7 @@ uvicorn[standard]==0.38.0
 pydantic==2.12.5
 pydantic-settings==2.12.0
 python-dotenv==1.2.1
+jpholiday==0.1.10
 
 SQLAlchemy==2.0.44
 aiosqlite==0.21.0

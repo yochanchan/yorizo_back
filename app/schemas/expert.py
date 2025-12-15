@@ -22,6 +22,8 @@ class ExpertResponse(BaseModel):
 class AvailabilitySlot(BaseModel):
     date: date
     slots: List[str]
+    booked_slots: List[str]
+    available_count: int
 
 
 class ExpertAvailabilityResponse(BaseModel):

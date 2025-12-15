@@ -14,6 +14,7 @@ os.environ.setdefault("APP_ENV", "local")
 
 import models  # noqa: E402
 import database  # noqa: E402
+from app.services import booking_rules  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -42,7 +43,7 @@ def client_base() -> TestClient:
     return TestClient(app)
 
 
-def _seed_bookings():
+def _seed_bookings(base_today: date):
     db = database.SessionLocal()
     try:
         user = models.User(id="demo-user", nickname=None)
@@ -52,11 +53,10 @@ def _seed_bookings():
         db.commit()
         db.refresh(expert)
 
-        today = date.today()
         past = models.ConsultationBooking(
             expert_id=expert.id,
             user_id=user.id,
-            date=today - timedelta(days=1),
+            date=base_today - timedelta(days=1),
             time_slot="15:00-16:00",
             channel="online",
             name="Past Booking",
@@ -65,7 +65,7 @@ def _seed_bookings():
         first = models.ConsultationBooking(
             expert_id=expert.id,
             user_id=user.id,
-            date=today + timedelta(days=1),
+            date=base_today + timedelta(days=1),
             time_slot="09:00-10:00",
             channel="online",
             name="First Future",
@@ -74,7 +74,7 @@ def _seed_bookings():
         second = models.ConsultationBooking(
             expert_id=expert.id,
             user_id=user.id,
-            date=today + timedelta(days=1),
+            date=base_today + timedelta(days=1),
             time_slot="10:00-11:00",
             channel="in-person",
             name="Second Future",
@@ -83,7 +83,7 @@ def _seed_bookings():
         later = models.ConsultationBooking(
             expert_id=expert.id,
             user_id=user.id,
-            date=today + timedelta(days=3),
+            date=base_today + timedelta(days=3),
             time_slot="12:00-13:00",
             channel="online",
             name="Later Future",
@@ -102,8 +102,10 @@ def _seed_bookings():
         db.close()
 
 
-def test_list_consultations_filters_future_and_limits(client_base: TestClient):
-    bookings = _seed_bookings()
+def test_list_consultations_filters_future_and_limits(monkeypatch, client_base: TestClient):
+    base_today = date(2025, 12, 24)
+    monkeypatch.setattr(booking_rules, "get_jst_today", lambda: base_today)
+    bookings = _seed_bookings(base_today)
 
     resp = client_base.get("/api/consultations", params={"user_id": "demo-user", "limit": 2})
     assert resp.status_code == 200, resp.text

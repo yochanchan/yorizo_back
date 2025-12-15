@@ -57,6 +57,8 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("AZURE_OPENAI_EMBED_DEPLOYMENT", "AZURE_OPENAI_EMBED_MODEL"),
     )
+    azure_speech_key: str | None = Field(default=None, validation_alias=AliasChoices("AZURE_SPEECH_KEY"))
+    azure_speech_region: str | None = Field(default=None, validation_alias=AliasChoices("AZURE_SPEECH_REGION"))
     rag_persist_dir: str = Field(default="./rag_store", validation_alias=AliasChoices("RAG_PERSIST_DIR"))
     rag_enabled: bool = Field(default=True, validation_alias=AliasChoices("ENABLE_RAG"))
     cosmos_mongo_uri: str | None = Field(default=None, validation_alias=AliasChoices("COSMOS_MONGO_URI"))
