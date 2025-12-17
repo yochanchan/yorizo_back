@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, TypeVar, Union, cast
 
 from fastapi import HTTPException
+import openai
 from openai import AsyncOpenAI, AzureOpenAI, OpenAIError
 from openai.types.chat import ChatCompletionMessageParam
 
@@ -29,6 +30,10 @@ def _as_message_list(messages: Sequence[ChatMessage]) -> List[ChatMessage]:
 
 class AzureNotConfiguredError(RuntimeError):
     """Raised when Azure OpenAI settings are missing."""
+
+
+class ContextLengthExceededError(Exception):
+    """Raised when Azure/OpenAI rejects a request for exceeding context length."""
 
 
 @dataclass
@@ -93,6 +98,13 @@ def chat_completion_json(
         return resp.choices[0].message.content or "{}"
     except AzureNotConfiguredError:
         raise
+    except openai.BadRequestError as exc:
+        msg = str(exc)
+        if "context_length_exceeded" in msg or "maximum context length" in msg:
+            logger.warning("Azure OpenAI context length exceeded (will be handled by caller).")
+            raise ContextLengthExceededError(msg) from exc
+        logger.exception("Azure OpenAI bad request during chat completion")
+        raise HTTPException(status_code=502, detail="upstream AI error") from exc
     except OpenAIError as exc:  # pragma: no cover - upstream error handling
         logger.exception("Azure OpenAI error during chat completion")
         raise HTTPException(status_code=502, detail="upstream AI error") from exc

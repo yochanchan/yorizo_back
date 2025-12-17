@@ -11,7 +11,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.core.openai_client import AzureNotConfiguredError, chat_completion_json
+from app.core.openai_client import AzureNotConfiguredError, ContextLengthExceededError, chat_completion_json
+from app.core.prompt_budget import compact_hits, shrink_messages, truncate_text
 from app.schemas.company_report import (
     CompanySummary,
     CompanyReportResponse,
@@ -600,6 +601,103 @@ def _build_report_context(
     )
 
 
+def _compact_documents(documents: List[str], *, max_hits: int, max_chars_per_hit: int, max_total_chars: int) -> List[str]:
+    hits = [{"content": doc} for doc in documents if doc]
+    compacted = compact_hits(
+        hits,
+        max_hits=max_hits,
+        max_chars_per_hit=max_chars_per_hit,
+        max_total_chars=max_total_chars,
+    )
+    return [hit.get("content", "") for hit in compacted if hit.get("content")]
+
+
+def _shrink_chat_messages_context(messages: List[Dict[str, Any]], *, max_items: int, max_chars: int) -> List[Dict[str, Any]]:
+    trimmed: List[Dict[str, Any]] = []
+    for msg in (messages or [])[-max_items:]:
+        if not isinstance(msg, dict):
+            continue
+        entry = dict(msg)
+        entry["content"] = truncate_text(str(entry.get("content", "")), max_chars)
+        trimmed.append(entry)
+    return trimmed
+
+
+def _shrink_homeworks(homeworks: List[Dict[str, Any]], *, max_chars: int) -> List[Dict[str, Any]]:
+    trimmed: List[Dict[str, Any]] = []
+    for hw in homeworks or []:
+        if not isinstance(hw, dict):
+            continue
+        item = dict(hw)
+        for key in ("title", "description"):
+            if key in item:
+                item[key] = truncate_text(str(item.get(key) or ""), max_chars)
+        trimmed.append(item)
+    return trimmed
+
+
+def _shrink_profile(profile: Dict[str, Any], *, max_chars: int) -> Dict[str, Any]:
+    return {
+        key: (truncate_text(str(value), max_chars) if isinstance(value, str) else value)
+        for key, value in (profile or {}).items()
+    }
+
+
+def _shrink_report_payload(
+    report_context: ReportContextPayload,
+    *,
+    doc_limits: Dict[str, int],
+    chat_limit: int,
+    chat_char_limit: int,
+    homework_char_limit: int,
+    profile_char_limit: int,
+) -> Dict[str, Any]:
+    payload = report_context.to_dict()
+    payload["documents"] = _compact_documents(
+        payload.get("documents") or [],
+        max_hits=doc_limits.get("max_hits", 8),
+        max_chars_per_hit=doc_limits.get("max_chars_per_hit", 1500),
+        max_total_chars=doc_limits.get("max_total_chars", 16000),
+    )
+    payload["chat_messages"] = _shrink_chat_messages_context(
+        payload.get("chat_messages") or [],
+        max_items=chat_limit,
+        max_chars=chat_char_limit,
+    )
+    payload["homeworks"] = _shrink_homeworks(payload.get("homeworks") or [], max_chars=homework_char_limit)
+    payload["company_profile"] = _shrink_profile(payload.get("company_profile") or {}, max_chars=profile_char_limit)
+    return payload
+
+
+def _build_report_messages(
+    report_context: ReportContextPayload,
+    *,
+    doc_limits: Dict[str, int],
+    chat_limit: int,
+    chat_char_limit: int,
+    homework_char_limit: int,
+    profile_char_limit: int,
+    token_budget: int,
+) -> List[Dict[str, Any]]:
+    payload = _shrink_report_payload(
+        report_context,
+        doc_limits=doc_limits,
+        chat_limit=chat_limit,
+        chat_char_limit=chat_char_limit,
+        homework_char_limit=homework_char_limit,
+        profile_char_limit=profile_char_limit,
+    )
+    user_content = (
+        f"{LLM_OUTPUT_GUIDANCE}\n\n"
+        f"入力情報:\n{json.dumps(payload, ensure_ascii=False)}"
+    )
+    messages = [
+        {"role": "system", "content": LLM_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+    return shrink_messages(messages, token_budget=token_budget)
+
+
 LLM_SYSTEM_PROMPT = """あなたは中小企業診断士です。以下の情報を踏まえて、日本語で簡潔にレポートをまとめてください。
 
 入力として以下が与えられます:
@@ -645,25 +743,41 @@ def _generate_report_with_llm(report_context: ReportContextPayload) -> Tuple[
     List[str],
     List[str],
 ]:
-    user_content = (
-        f"{LLM_OUTPUT_GUIDANCE}\n\n"
-        f"繝ｬ繝昴・繝医・譚先侭:\n{json.dumps(report_context.to_dict(), ensure_ascii=False)}"
+    base_messages = _build_report_messages(
+        report_context,
+        doc_limits={"max_hits": 8, "max_chars_per_hit": 1500, "max_total_chars": 16000},
+        chat_limit=40,
+        chat_char_limit=800,
+        homework_char_limit=800,
+        profile_char_limit=800,
+        token_budget=110000,
     )
+    raw: Optional[str] = None
     try:
-        raw = chat_completion_json(
-            messages=[
-                {"role": "system", "content": LLM_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            max_tokens=1400,
+        raw = chat_completion_json(messages=base_messages, max_tokens=1400)
+    except ContextLengthExceededError:
+        logger.info("Report prompt exceeded context length; retrying with aggressive compaction.")
+        fallback_messages = _build_report_messages(
+            report_context,
+            doc_limits={"max_hits": 4, "max_chars_per_hit": 800, "max_total_chars": 6000},
+            chat_limit=16,
+            chat_char_limit=500,
+            homework_char_limit=500,
+            profile_char_limit=600,
+            token_budget=90000,
         )
+        try:
+            raw = chat_completion_json(messages=fallback_messages, max_tokens=1200)
+        except ContextLengthExceededError:
+            logger.warning("Report prompt still exceeds context length after fallback.")
+            return _fallback_report_fields()
     except AzureNotConfiguredError as exc:
         logger.error("Report LLM client init failed. Check Azure/OpenAI env vars.", exc_info=exc)
         return _fallback_report_fields()
     except Exception:
         logger.exception("Report LLM call failed.")
         return _fallback_report_fields()
-    return _parse_llm_output(raw)
+    return _parse_llm_output(raw or "")
 
 
 QUAL_ROWS = {
@@ -872,6 +986,3 @@ def build_company_report(db: Session, company_id: str) -> CompanyReportResponse:
         gap_summary=gap_summary,
         thinking_questions=thinking_questions,
     )
-
-
-
